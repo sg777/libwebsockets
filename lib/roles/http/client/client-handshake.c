@@ -153,6 +153,10 @@ send_hs:
 		 * wait in the queue until it's possible to send them.
 		 */
 		lws_callback_on_writable(wsi_piggyback);
+#if defined(LWS_WITH_DETAILED_LATENCY)
+		wsi->detlat.earliest_write_req =
+			wsi->detlat.earliest_write_req_pre_write = lws_now_usecs();
+#endif
 		lwsl_info("%s: wsi %p: waiting to send hdrs (par state 0x%x)\n",
 			    __func__, wsi, lwsi_state(wsi_piggyback));
 	} else {
@@ -267,7 +271,7 @@ lws_client_connect_3(struct lws *wsi, const char *ads,
 	}
 
 #if defined(LWS_WITH_UNIX_SOCK)
-	if (*ads == '+') {
+	if (ads && *ads == '+') {
 		ads++;
 		memset(&sau, 0, sizeof(sau));
 		sau.sun_family = AF_UNIX;
@@ -280,6 +284,22 @@ lws_client_connect_3(struct lws *wsi, const char *ads,
 			sau.sun_path[0] = '\0';
 
 		goto ads_known;
+	}
+#endif
+
+	if (n == LADNS_RET_FAILED)
+		goto oom4;
+
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	if (lwsi_state(wsi) == LRS_WAITING_ASYNC_DNS &&
+	    wsi->context->detailed_latency_cb) {
+		wsi->detlat.type = LDLT_NAME_RESOLUTION;
+		wsi->detlat.latencies[LAT_DUR_PROXY_CLIENT_REQ_TO_WRITE] =
+			lws_now_usecs() -
+			wsi->detlat.earliest_write_req_pre_write;
+		wsi->detlat.latencies[LAT_DUR_USERCB] = 0;
+		lws_det_lat_cb(wsi->context, &wsi->detlat);
+		wsi->detlat.earliest_write_req_pre_write = lws_now_usecs();
 	}
 #endif
 
@@ -439,6 +459,11 @@ lws_client_connect_3(struct lws *wsi, const char *ads,
 ads_known:
 #endif
 
+	/*
+	 * We have a name resolution to try... we might have to try more than
+	 * one, so accumulate any duration
+	 */
+
 	/* now we decided on ipv4 or ipv6, set the port */
 
 	if (!lws_socket_is_valid(wsi->desc.sockfd)) {
@@ -556,6 +581,11 @@ ads_known:
 		}
 	}
 
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	wsi->detlat.earliest_write_req =
+		wsi->detlat.earliest_write_req_pre_write =
+						lws_now_usecs();
+#endif
 	if (connect(wsi->desc.sockfd, (const struct sockaddr *)psa, n) == -1 ||
 	    LWS_ERRNO == LWS_EISCONN) {
 		if (LWS_ERRNO == LWS_EALREADY ||
@@ -586,13 +616,29 @@ ads_known:
 		}
 
 		if (LWS_ERRNO != LWS_EISCONN) {
-			lwsl_notice("Connect failed: port %d errno=%d\n", port, LWS_ERRNO);
+			lwsl_notice("Connect failed: port %d errno=%d\n",
+					port, LWS_ERRNO);
 			cce = "connect failed";
 			goto failed;
 		}
 	}
 
+conn_good:
+	/* the tcp connection has happend */
 
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	if (wsi->context->detailed_latency_cb) {
+		wsi->detlat.type = LDLT_CONNECTION;
+		wsi->detlat.latencies[LAT_DUR_PROXY_CLIENT_REQ_TO_WRITE] =
+			lws_now_usecs() -
+			wsi->detlat.earliest_write_req_pre_write;
+		wsi->detlat.latencies[LAT_DUR_USERCB] = 0;
+		lws_det_lat_cb(wsi->context, &wsi->detlat);
+		wsi->detlat.earliest_write_req =
+			wsi->detlat.earliest_write_req_pre_write =
+							lws_now_usecs();
+	}
+#endif
 
 	return lws_client_connect_4(wsi, NULL, plen);
 
@@ -644,6 +690,12 @@ lws_client_connect_2(struct lws *wsi)
 	const char *iface;
 #endif
 	int n, port = 0;
+
+	if (lwsi_state(wsi) == LRS_WAITING_ASYNC_DNS) {
+		lwsl_notice("%s: LRS_WAITING_ASYNC_DNS\n", __func__);
+
+		return wsi;
+	}
 
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 	if (!wsi->http.ah && !wsi->stash) {
@@ -854,9 +906,14 @@ create_new_conn:
 	lwsl_info("%s: %p: address %s:%u\n", __func__, wsi, ads, port);
 	(void)port;
 
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	wsi->detlat.earliest_write_req_pre_write = lws_now_usecs();
+#endif
+
 #if !defined(LWS_WITH_ASYNC_DNS)
 	n = lws_getaddrinfo46(wsi, ads, &result);
 #else
+	lwsi_set_state(wsi, LRS_WAITING_ASYNC_DNS);
 	/* this is either FAILED, CONTINUING, or already called connect_4 */
 	n = lws_async_dns_query(wsi, ads, LWS_ADNS_RECORD_A,
 				lws_client_connect_3);
