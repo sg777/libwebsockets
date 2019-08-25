@@ -307,6 +307,52 @@ typedef struct lws_dsh {
 } lws_dsh_t;
 
 /*
+ * lws_async_dns
+ */
+
+typedef struct lws * (*lws_async_dns_cb_t)(struct lws *wsi, const char *ads,
+					   struct addrinfo *result, int n);
+
+typedef struct lws_async_dns {
+	struct sockaddr_in 	sa;
+	lws_dll2_owner_t	active;
+	lws_dll2_owner_t	cached;
+	struct lws		*wsi;
+	time_t			time_set_server;
+	uint16_t		tid;
+	char			dns_server_set;
+} lws_async_dns_t;
+
+typedef enum dns_query_type {
+	LWS_ADNS_RECORD_A					= 0x01,
+	LWS_ADNS_RECORD_MX					= 0x0f
+} adns_query_type_t;
+
+typedef enum {
+	LADNS_RET_FAILED_WSI_CLOSED				= -4,
+	LADNS_RET_NXDOMAIN					= -3,
+	LADNS_RET_TIMEDOUT					= -2,
+	LADNS_RET_FAILED					= -1,
+	LADNS_RET_FOUND,
+	LADNS_RET_CONTINUING
+} lws_async_dns_retcode_t;
+
+typedef enum {
+	LADNS_CONF_SERVER_UNKNOWN				= -1,
+	LADNS_CONF_SERVER_SAME,
+	LADNS_CONF_SERVER_CHANGED
+} lws_async_dns_server_check_t;
+
+lws_async_dns_retcode_t
+lws_async_dns_query(struct lws *wsi, const char *name,
+		    enum dns_query_type qtype, lws_async_dns_cb_t cb);
+void
+lws_aysnc_dns_completed(struct lws *wsi, void *sa, size_t salen,
+			lws_async_dns_retcode_t ret);
+void
+lws_async_dns_cancel(struct lws *wsi);
+
+/*
  * so we can have n connections being serviced simultaneously,
  * these things need to be isolated per-thread.
  */
@@ -395,6 +441,10 @@ struct lws_context_per_thread {
 	struct lws_signal_watcher w_sigint;
 #endif
 
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	lws_usec_t	ust_left_poll;
+#endif
+
 	/* --- */
 
 	unsigned long count_conns;
@@ -447,7 +497,6 @@ struct lws_conn_stats {
  *
  *    SSL SNI -> wsi -> bind after SSL negotiation
  */
-
 
 struct lws_vhost {
 #if defined(LWS_WITH_CLIENT) && defined(LWS_CLIENT_HTTP_PROXYING)
@@ -545,6 +594,10 @@ struct lws_vhost {
 void
 __lws_vhost_destroy2(struct lws_vhost *vh);
 
+/*
+ * struct lws
+ */
+
 struct lws {
 	/* structs */
 
@@ -562,11 +615,6 @@ struct lws {
 	struct _lws_dbus_mode_related dbus;
 #endif
 
-
-	const struct lws_role_ops *role_ops;
-	lws_wsi_state_t	wsistate;
-	lws_wsi_state_t wsistate_pre_close;
-
 	/* lifetime members */
 
 #if defined(LWS_WITH_LIBEV) || defined(LWS_WITH_LIBUV) || \
@@ -577,9 +625,23 @@ struct lws {
 	struct lws_io_watcher w_write;
 #endif
 
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	lws_detlat_t	detlat;
+#endif
+
 	lws_sorted_usec_list_t sul_timeout;
 	lws_sorted_usec_list_t sul_hrtimer;
-
+	struct lws_dll2 dll_buflist; /* guys with pending rxflow */
+	struct lws_dll2 same_vh_protocol;
+#if defined(LWS_WITH_ASYNC_DNS)
+	struct lws_dll2 adns;	/* on adns list of guys to tell result */
+	lws_async_dns_cb_t adns_cb;	/* callback with result */
+#endif
+#if defined(LWS_WITH_CLIENT)
+	struct lws_dll2 dll_cli_active_conns;
+	struct lws_dll2_owner dll2_cli_txn_queue_owner;
+	struct lws_dll2 dll2_cli_txn_queue;
+#endif
 	/* pointers */
 
 	struct lws_context *context;
@@ -587,13 +649,9 @@ struct lws {
 	struct lws *parent; /* points to parent, if any */
 	struct lws *child_list; /* points to first child */
 	struct lws *sibling_list; /* subsequent children at same level */
-
+	const struct lws_role_ops *role_ops;
 	const struct lws_protocols *protocol;
-	struct lws_dll2 same_vh_protocol;
-
 	struct lws_sequencer *seq;	/* associated sequencer if any */
-
-	struct lws_dll2 dll_buflist; /* guys with pending rxflow */
 
 #if defined(LWS_WITH_THREADPOOL)
 	struct lws_threadpool_task *tp_task;
@@ -607,9 +665,6 @@ struct lws {
 #if defined(LWS_WITH_CLIENT)
 	struct client_info_stash *stash;
 	char *cli_hostname_copy;
-	struct lws_dll2 dll_cli_active_conns;
-	struct lws_dll2_owner dll2_cli_txn_queue_owner;
-	struct lws_dll2 dll2_cli_txn_queue;
 #endif
 	void *user_space;
 	void *opaque_parent_data;
@@ -629,11 +684,8 @@ struct lws {
 	uint64_t accept_start_us;
 #endif
 #endif
-
-#ifdef LWS_LATENCY
-	unsigned long action_start;
-	unsigned long latency_start;
-#endif
+	lws_wsi_state_t	wsistate;
+	lws_wsi_state_t wsistate_pre_close;
 
 	/* ints */
 #define LWS_NO_FDS_POS (-1)
@@ -676,8 +728,9 @@ struct lws {
 	unsigned int protocol_bind_balance:1;
 	unsigned int unix_skt:1;
 	unsigned int close_when_buffered_out_drained:1;
-	unsigned int h1_ws_proxied;
-	unsigned int proxied_ws_parent;
+	unsigned int h1_ws_proxied:1;
+	unsigned int proxied_ws_parent:1;
+	unsigned int do_bind:1;
 
 	unsigned int could_have_pending:1; /* detect back-to-back writes */
 	unsigned int outer_will_close:1;
@@ -703,9 +756,7 @@ struct lws {
 	unsigned int sock_send_blocking:1;
 #endif
 
-#if defined(LWS_WITH_CLIENT)
-	unsigned short c_port;
-#endif
+	uint16_t c_port;
 
 	/* chars */
 
@@ -1168,7 +1219,19 @@ extern const struct lws_protocols protocol_abs_client_raw_skt,
 				  protocol_abs_client_unit_test;
 
 void
+__lws_reset_wsi(struct lws *wsi);
+
+void
 lws_inform_client_conn_fail(struct lws *wsi, void *arg, size_t len);
+
+#if defined(LWS_WITH_ASYNC_DNS)
+lws_async_dns_server_check_t
+lws_plat_asyncdns_init(struct lws_context *context, struct sockaddr_in *sa);
+int
+lws_async_dns_init(struct lws_context *context);
+void
+lws_async_dns_deinit(lws_async_dns_t *dns);
+#endif
 
 #ifdef __cplusplus
 };
