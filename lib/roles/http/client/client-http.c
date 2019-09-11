@@ -141,7 +141,6 @@ lws_client_socket_service(struct lws *wsi, struct lws_pollfd *pollfd,
 	switch (lwsi_state(wsi)) {
 
 	case LRS_WAITING_ASYNC_DNS:
-		lwsl_notice("LRS_WAITING_ASYNC_DNS\n");
 		return 0;
 
 	case LRS_WAITING_CONNECT:
@@ -150,7 +149,6 @@ lws_client_socket_service(struct lws *wsi, struct lws_pollfd *pollfd,
 		 * we are under PENDING_TIMEOUT_SENT_CLIENT_HANDSHAKE
 		 * timeout protection set in client-handshake.c
 		 */
-		lwsl_notice("LRS_WAITING_CONNECT\n");
 
 		if (!lws_client_connect_3(wsi, NULL, NULL, LADNS_RET_FOUND)) {
 			/* closed */
