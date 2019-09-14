@@ -1,23 +1,27 @@
 /*
- * ws protocol handler plugin for messageboard "generic sessions" demo
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2016 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation:
- * version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- * You should have received a copy of the GNU General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
+
 
 #define LWS_DLL
 #define LWS_INTERNAL
@@ -157,12 +161,13 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 	const struct lws_protocol_vhost_options *pvo;
 	struct per_vhost_data__gs_mb *vhd = (struct per_vhost_data__gs_mb *)
 		lws_protocol_vh_priv_get(lws_get_vhost(wsi), lws_get_protocol(wsi));
-	unsigned char *p, *start, *end, buffer[LWS_PRE + 256];
+	unsigned char *p, *start, *end, buffer[LWS_PRE + 4096];
 	char s[512];
 	int n;
 
 	switch (reason) {
 	case LWS_CALLBACK_PROTOCOL_INIT: /* per vhost */
+
 		vhd = lws_protocol_vh_priv_zalloc(lws_get_vhost(wsi),
 			lws_get_protocol(wsi), sizeof(struct per_vhost_data__gs_mb));
 		if (!vhd)
@@ -187,9 +192,8 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 			return 1;
 		}
 
-		if (sqlite3_open_v2(vhd->message_db, &vhd->pdb,
-				    SQLITE_OPEN_READWRITE |
-				    SQLITE_OPEN_CREATE, NULL) != SQLITE_OK) {
+		if (lws_struct_sq3_open(lws_get_context(wsi),
+					vhd->message_db, &vhd->pdb)) {
 			lwsl_err("Unable to open message db %s: %s\n",
 				 vhd->message_db, sqlite3_errmsg(vhd->pdb));
 
@@ -224,6 +228,14 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 		}
 
 		lws_callback_on_writable(wsi);
+		break;
+
+	case LWS_CALLBACK_CLOSED:
+		lwsl_debug("%s: LWS_CALLBACK_CLOSED\n", __func__);
+		if (pss && pss->pss_gs) {
+			free(pss->pss_gs);
+			pss->pss_gs = NULL;
+		}
 		break;
 
 	case LWS_CALLBACK_SERVER_WRITEABLE:
@@ -279,7 +291,8 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 		pss->our_form = 0;
 
 		/* ie, it's our messageboard new message form */
-		if (!strcmp((const char *)in, "/msg")) {
+		if (!strcmp((const char *)in, "/msg") ||
+		    !strcmp((const char *)in, "msg")) {
 			pss->our_form = 1;
 			break;
 		}
@@ -308,9 +321,11 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 
 	case LWS_CALLBACK_HTTP_WRITEABLE:
 		if (!pss->second_http_part)
-			break;
+			goto passthru;
+
 		s[0] = '0';
-		n = lws_write(wsi, (unsigned char *)s, 1, LWS_WRITE_HTTP);
+		n = lws_write(wsi, (unsigned char *)s, 1, LWS_WRITE_HTTP|
+				LWS_WRITE_H2_STREAM_END);
 		if (n != 1)
 			return -1;
 
@@ -336,18 +351,18 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 			return -1;
 		if (lws_finalize_http_header(wsi, &p, end))
 			return -1;
+
 		n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
 		if (n != (p - start)) {
 			lwsl_err("_write returned %d from %ld\n", n, (long)(p - start));
 			return -1;
 		}
 		pss->second_http_part = 1;
-
 		lws_callback_on_writable(wsi);
 		break;
 
 	case LWS_CALLBACK_HTTP_BIND_PROTOCOL:
-		if (!pss || pss->pss_gs)
+		if (!pss || !vhd || pss->pss_gs)
 			break;
 
 		pss->pss_gs = malloc(vhd->gsp->per_session_data_size);
@@ -375,6 +390,7 @@ callback_messageboard(struct lws *wsi, enum lws_callback_reasons reason,
 passthru:
 		if (!pss || !vhd)
 			break;
+
 		return vhd->gsp->callback(wsi, reason, pss->pss_gs, in, len);
 	}
 

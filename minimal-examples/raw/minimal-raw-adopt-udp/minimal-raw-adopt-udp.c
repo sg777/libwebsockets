@@ -1,7 +1,7 @@
 /*
  * lws-minimal-raw-adopt-udp
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -18,16 +18,18 @@
 #include <libwebsockets.h>
 #include <string.h>
 #include <signal.h>
+#if !defined(WIN32)
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <arpa/inet.h>
+#endif
+#include <sys/types.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
-#include <arpa/inet.h>
 
 static uint8_t sendbuf[4096];
 static size_t sendlen;
@@ -96,7 +98,11 @@ callback_raw_test(struct lws *wsi, enum lws_callback_reasons reason,
 		 *
 		 * For clarity partial sends just drop the remainder here.
 		 */
-		n = sendto(fd, sendbuf, sendlen, 0, &udp.sa, udp.salen);
+		n = sendto(fd,
+#if defined(WIN32)
+				(const char *)
+#endif
+			sendbuf, sendlen, 0, &udp.sa, udp.salen);
 		if (n < (ssize_t)len)
 			lwsl_notice("%s: send returned %d\n", __func__, (int)n);
 		break;
@@ -163,14 +169,14 @@ int main(int argc, const char **argv)
 	/*
 	 * Create our own "foreign" UDP socket bound to 7681/udp
 	 */
-	if (!lws_create_adopt_udp(vhost, 7681, LWS_CAUDP_BIND,
+	if (!lws_create_adopt_udp(vhost, NULL, 7681, LWS_CAUDP_BIND,
 				  protocols[0].name, NULL)) {
 		lwsl_err("%s: foreign socket adoption failed\n", __func__);
 		goto bail;
 	}
 
 	while (n >= 0 && !interrupted)
-		n = lws_service(context, 1000);
+		n = lws_service(context, 0);
 
 bail:
 	lws_context_destroy(context);

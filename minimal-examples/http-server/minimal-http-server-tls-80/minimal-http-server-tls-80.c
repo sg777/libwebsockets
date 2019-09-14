@@ -1,7 +1,7 @@
 /*
  * lws-minimal-http-server-tls-80
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -127,7 +127,7 @@ int main(int argc, const char **argv)
 	}
 
 	while (n >= 0 && !interrupted)
-		n = lws_service(context, 1000);
+		n = lws_service(context, 0);
 
 bail:
 	lws_context_destroy(context);

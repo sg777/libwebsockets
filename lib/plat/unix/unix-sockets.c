@@ -1,26 +1,29 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
 #define _GNU_SOURCE
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #include <pwd.h>
 #include <grp.h>
@@ -32,6 +35,11 @@ lws_send_pipe_choked(struct lws *wsi)
 {
 	struct lws_pollfd fds;
 	struct lws *wsi_eff;
+
+#if !defined(LWS_WITHOUT_EXTENSIONS)
+	if (wsi->ws && wsi->ws->tx_draining_ext)
+		return 1;
+#endif
 
 #if defined(LWS_WITH_HTTP2)
 	wsi_eff = lws_get_network_wsi(wsi);
@@ -66,6 +74,11 @@ lws_send_pipe_choked(struct lws *wsi)
 	return 0;
 }
 
+int
+lws_plat_set_nonblocking(int fd)
+{
+	return fcntl(fd, F_SETFL, O_NONBLOCK) < 0;
+}
 
 int
 lws_plat_set_socket_options(struct lws_vhost *vhost, int fd, int unix_skt)
@@ -156,11 +169,7 @@ lws_plat_set_socket_options(struct lws_vhost *vhost, int fd, int unix_skt)
 		return 1;
 #endif
 
-	/* We are nonblocking... */
-	if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0)
-		return 1;
-
-	return 0;
+	return lws_plat_set_nonblocking(fd);
 }
 
 
@@ -202,13 +211,14 @@ lws_interface_to_sa(int ipv6, const char *ifname, struct sockaddr_in *addr,
 #ifdef LWS_WITH_IPV6
 			if (ipv6) {
 				/* map IPv4 to IPv6 */
-				bzero((char *)&addr6->sin6_addr,
+				memset((char *)&addr6->sin6_addr, 0,
 						sizeof(struct in6_addr));
 				addr6->sin6_addr.s6_addr[10] = 0xff;
 				addr6->sin6_addr.s6_addr[11] = 0xff;
 				memcpy(&addr6->sin6_addr.s6_addr[12],
 				       &((struct sockaddr_in *)ifc->ifa_addr)->sin_addr,
 							sizeof(struct in_addr));
+				lwsl_debug("%s: uplevelling ipv4 bind to ipv6\n", __func__);
 			} else
 #endif
 				memcpy(addr,

@@ -1,7 +1,31 @@
+/*
+ * libwebsockets - small server side websockets and web server implementation
+ *
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
 #ifndef _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #endif
-#include "core/private.h"
+#include "private-lib-core.h"
 
 
 LWS_VISIBLE int
@@ -43,12 +67,19 @@ lws_poll_listen_fd(struct lws_pollfd *fd)
 }
 
 int
+lws_plat_set_nonblocking(int fd)
+{
+	u_long optl = 1;
+
+	return !!ioctlsocket(fd, FIONBIO, &optl);
+}
+
+int
 lws_plat_set_socket_options(struct lws_vhost *vhost, lws_sockfd_type fd,
 			    int unix_skt)
 {
 	int optval = 1;
 	int optlen = sizeof(optval);
-	u_long optl = 1;
 	DWORD dwBytesRet;
 	struct tcp_keepalive alive;
 	int protonbr;
@@ -87,10 +118,7 @@ lws_plat_set_socket_options(struct lws_vhost *vhost, lws_sockfd_type fd,
 
 	setsockopt(fd, protonbr, TCP_NODELAY, (const char *)&optval, optlen);
 
-	/* We are nonblocking... */
-	ioctlsocket(fd, FIONBIO, &optl);
-
-	return 0;
+	return lws_plat_set_nonblocking(fd);
 }
 
 
@@ -128,10 +156,15 @@ void
 lws_plat_insert_socket_into_fds(struct lws_context *context, struct lws *wsi)
 {
 	struct lws_context_per_thread *pt = &context->pt[(int)wsi->tsi];
+	int n = LWS_POLLIN | LWS_POLLHUP | FD_CONNECT;
+
+	if (wsi->udp) {
+		lwsl_info("%s: UDP\n", __func__);
+		n = LWS_POLLIN;
+	}
 
 	pt->fds[pt->fds_count++].revents = 0;
-	WSAEventSelect(wsi->desc.sockfd, pt->events,
-			   LWS_POLLIN | LWS_POLLHUP | FD_CONNECT);
+	WSAEventSelect(wsi->desc.sockfd, pt->events, n);
 }
 
 void
@@ -166,16 +199,15 @@ lws_plat_change_pollfd(struct lws_context *context,
 			  struct lws *wsi, struct lws_pollfd *pfd)
 {
 	struct lws_context_per_thread *pt = &context->pt[(int)wsi->tsi];
-	long networkevents = LWS_POLLHUP | FD_CONNECT;
+	long e = LWS_POLLHUP | FD_CONNECT;
 
 	if ((pfd->events & LWS_POLLIN))
-		networkevents |= LWS_POLLIN;
+		e |= LWS_POLLIN;
 
 	if ((pfd->events & LWS_POLLOUT))
-		networkevents |= LWS_POLLOUT;
+		e |= LWS_POLLOUT;
 
-	if (WSAEventSelect(wsi->desc.sockfd, pt->events,
-			   networkevents) != SOCKET_ERROR)
+	if (WSAEventSelect(wsi->desc.sockfd, pt->events, e) != SOCKET_ERROR)
 		return 0;
 
 	lwsl_err("WSAEventSelect() failed with error %d\n", LWS_ERRNO);
@@ -198,7 +230,7 @@ lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
 
 	if (af == AF_INET) {
 		struct sockaddr_in srcaddr;
-		bzero(&srcaddr, sizeof(srcaddr));
+		memset(&srcaddr, 0, sizeof(srcaddr));
 		srcaddr.sin_family = AF_INET;
 		memcpy(&(srcaddr.sin_addr), src, sizeof(srcaddr.sin_addr));
 
@@ -207,7 +239,7 @@ lws_plat_inet_ntop(int af, const void *src, char *dst, int cnt)
 #ifdef LWS_WITH_IPV6
 	} else if (af == AF_INET6) {
 		struct sockaddr_in6 srcaddr;
-		bzero(&srcaddr, sizeof(srcaddr));
+		memset(&srcaddr, 0, sizeof(srcaddr));
 		srcaddr.sin6_family = AF_INET6;
 		memcpy(&(srcaddr.sin6_addr), src, sizeof(srcaddr.sin6_addr));
 
@@ -251,7 +283,8 @@ lws_plat_inet_pton(int af, const char *src, void *dst)
 	if (af == AF_INET) {
 		struct sockaddr_in dstaddr;
 		int dstaddrlen = sizeof(dstaddr);
-		bzero(&dstaddr, sizeof(dstaddr));
+
+		memset(&dstaddr, 0, sizeof(dstaddr));
 		dstaddr.sin_family = AF_INET;
 
 		if (!WSAStringToAddressW(buffer, af, 0, (struct sockaddr *) &dstaddr, &dstaddrlen)) {
@@ -262,7 +295,8 @@ lws_plat_inet_pton(int af, const char *src, void *dst)
 	} else if (af == AF_INET6) {
 		struct sockaddr_in6 dstaddr;
 		int dstaddrlen = sizeof(dstaddr);
-		bzero(&dstaddr, sizeof(dstaddr));
+
+		memset(&dstaddr, 0, sizeof(dstaddr));
 		dstaddr.sin6_family = AF_INET6;
 
 		if (!WSAStringToAddressW(buffer, af, 0, (struct sockaddr *) &dstaddr, &dstaddrlen)) {

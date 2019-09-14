@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include <core/private.h>
+#include <private-lib-core.h>
 
 static int
 rops_handle_POLLIN_raw_proxy(struct lws_context_per_thread *pt, struct lws *wsi,
@@ -51,12 +54,13 @@ rops_handle_POLLIN_raw_proxy(struct lws_context_per_thread *pt, struct lws *wsi,
 	    !(wsi->favoured_pollin &&
 	      (pollfd->revents & pollfd->events & LWS_POLLOUT))) {
 
-		buffered = lws_buflist_aware_read(pt, wsi, &ebuf);
+		buffered = lws_buflist_aware_read(pt, wsi, &ebuf, __func__);
 		switch (ebuf.len) {
 		case 0:
 			lwsl_info("%s: read 0 len\n", __func__);
 			wsi->seen_zero_length_recv = 1;
-			lws_change_pollfd(wsi, LWS_POLLIN, 0);
+			if (lws_change_pollfd(wsi, LWS_POLLIN, 0))
+				goto fail;
 
 			/*
 			 * we need to go to fail here, since it's the only
@@ -82,7 +86,8 @@ rops_handle_POLLIN_raw_proxy(struct lws_context_per_thread *pt, struct lws *wsi,
 			goto fail;
 		}
 
-		if (lws_buflist_aware_consume(wsi, &ebuf, ebuf.len, buffered))
+		if (lws_buflist_aware_finished_consuming(wsi, &ebuf, ebuf.len,
+							 buffered, __func__))
 			return LWS_HPI_RET_PLEASE_CLOSE_ME;
 	} else
 		if (wsi->favoured_pollin &&
@@ -100,7 +105,7 @@ try_pollout:
 		return LWS_HPI_RET_PLEASE_CLOSE_ME;
 	}
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 	if (lws_client_socket_service(wsi, pollfd, NULL))
 		return LWS_HPI_RET_WSI_ALREADY_DIED;
 #endif
@@ -119,7 +124,7 @@ rops_adoption_bind_raw_proxy(struct lws *wsi, int type,
 {
 	/* no http but socket... must be raw skt */
 	if ((type & LWS_ADOPT_HTTP) || !(type & LWS_ADOPT_SOCKET) ||
-	    !(type & LWS_ADOPT_FLAG_RAW_PROXY) || (type & _LWS_ADOPT_FINISH))
+	    (!(type & LWS_ADOPT_FLAG_RAW_PROXY)) || (type & _LWS_ADOPT_FINISH))
 		return 0; /* no match */
 
 	if (type & LWS_ADOPT_FLAG_UDP)
@@ -151,7 +156,7 @@ rops_client_bind_raw_proxy(struct lws *wsi,
 
 		/* finalize */
 
-		if (!wsi->user_space && wsi->stash->method)
+		if (!wsi->user_space && wsi->stash->cis[CIS_METHOD])
 			if (lws_ensure_user_space(wsi))
 				return 1;
 
@@ -160,10 +165,11 @@ rops_client_bind_raw_proxy(struct lws *wsi,
 
 	/* we are a fallback if nothing else matched */
 
-	lws_role_transition(wsi, LWSIFR_CLIENT, LRS_UNCONNECTED,
-			    &role_ops_raw_proxy);
+	if (i->local_protocol_name && !strcmp(i->local_protocol_name, "raw-proxy"))
+		lws_role_transition(wsi, LWSIFR_CLIENT, LRS_UNCONNECTED,
+				    &role_ops_raw_proxy);
 
-	return 1;
+	return 0;
 }
 
 static int

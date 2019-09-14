@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include <core/private.h>
+#include <private-lib-core.h>
 
 #define LWS_CPYAPP(ptr, str) { strcpy(ptr, str); ptr += strlen(str); }
 
@@ -249,133 +252,11 @@ lws_extension_server_handshake(struct lws *wsi, char **p, int budget)
 #endif
 
 int
-lws_process_ws_upgrade(struct lws *wsi)
+lws_process_ws_upgrade2(struct lws *wsi)
 {
 	struct lws_context_per_thread *pt = &wsi->context->pt[(int)wsi->tsi];
 	const struct lws_protocol_vhost_options *pvos = NULL;
-	const struct lws_protocols *pcol = NULL;
 	const char *ws_prot_basic_auth = NULL;
-	char buf[128], name[64];
-	struct lws_tokenize ts;
-	lws_tokenize_elem e;
-
-	if (!wsi->protocol)
-		lwsl_err("NULL protocol at lws_read\n");
-
-	/*
-	 * It's either websocket or h2->websocket
-	 *
-	 * If we are on h1, confirm we got the required "connection: upgrade"
-	 * header.  h2 / ws-over-h2 does not have this.
-	 */
-
-#if defined(LWS_WITH_HTTP2)
-	if (wsi->http2_substream)
-		goto check_protocol;
-#endif
-
-	lws_tokenize_init(&ts, buf, LWS_TOKENIZE_F_COMMA_SEP_LIST |
-				    LWS_TOKENIZE_F_DOT_NONTERM |
-				    LWS_TOKENIZE_F_RFC7230_DELIMS |
-				    LWS_TOKENIZE_F_MINUS_NONTERM);
-	ts.len = lws_hdr_copy(wsi, buf, sizeof(buf) - 1, WSI_TOKEN_CONNECTION);
-	if (ts.len <= 0)
-		goto bad_conn_format;
-
-	do {
-		e = lws_tokenize(&ts);
-		switch (e) {
-		case LWS_TOKZE_TOKEN:
-			if (!strcasecmp(ts.token, "upgrade"))
-				e = LWS_TOKZE_ENDED;
-			break;
-
-		case LWS_TOKZE_DELIMITER:
-			break;
-
-		default: /* includes ENDED */
-bad_conn_format:
-			lwsl_err("%s: malformed or absent connection hdr\n",
-				 __func__);
-
-			return 1;
-		}
-	} while (e > 0);
-
-#if defined(LWS_WITH_HTTP2)
-check_protocol:
-#endif
-
-	/*
-	 * Select the first protocol we support from the list
-	 * the client sent us.
-	 */
-
-	lws_tokenize_init(&ts, buf, LWS_TOKENIZE_F_COMMA_SEP_LIST |
-				    LWS_TOKENIZE_F_MINUS_NONTERM |
-				    LWS_TOKENIZE_F_DOT_NONTERM |
-				    LWS_TOKENIZE_F_RFC7230_DELIMS);
-	ts.len = lws_hdr_copy(wsi, buf, sizeof(buf) - 1, WSI_TOKEN_PROTOCOL);
-	if (ts.len < 0) {
-		lwsl_err("%s: protocol list too long\n", __func__);
-		return 1;
-	}
-	if (!ts.len) {
-		int n = wsi->vhost->default_protocol_index;
-		/*
-		 * some clients only have one protocol and do not send the
-		 * protocol list header... allow it and match to the vhost's
-		 * default protocol (which itself defaults to zero)
-		 */
-		lwsl_info("%s: defaulting to prot handler %d\n", __func__, n);
-
-		lws_bind_protocol(wsi, &wsi->vhost->protocols[n],
-				  "ws upgrade default pcol");
-
-		goto alloc_ws;
-	}
-
-	/* otherwise go through the user-provided protocol list */
-
-	do {
-		e = lws_tokenize(&ts);
-		switch (e) {
-		case LWS_TOKZE_TOKEN:
-
-			if (lws_tokenize_cstr(&ts, name, sizeof(name))) {
-				lwsl_err("%s: pcol name too long\n", __func__);
-
-				return 1;
-			}
-			lwsl_debug("checking %s\n", name);
-			pcol = lws_vhost_name_to_protocol(wsi->vhost, name);
-			if (pcol) {
-				/* if we know it, bind to it and stop looking */
-				lws_bind_protocol(wsi, pcol, "ws upg pcol");
-				e = LWS_TOKZE_ENDED;
-			}
-			break;
-
-		case LWS_TOKZE_DELIMITER:
-		case LWS_TOKZE_ENDED:
-			break;
-
-		default:
-			lwsl_err("%s: malformatted protocol list", __func__);
-
-			return 1;
-		}
-	} while (e > 0);
-
-	/* we didn't find a protocol he wanted? */
-
-	if (!pcol) {
-		lwsl_notice("No supported protocol \"%s\"\n", buf);
-
-		return 1;
-	}
-
-alloc_ws:
 
 	/*
 	 * Allow basic auth a look-in now we bound the wsi to the protocol.
@@ -485,10 +366,196 @@ alloc_ws:
 	lws_server_init_wsi_for_ws(wsi);
 	lwsl_parser("accepted v%02d connection\n", wsi->ws->ietf_spec_revision);
 
+#if defined(LWS_WITH_ACCESS_LOG)
+	{
+		char *uptr = "unknown method", combo[128];
+		int l = 14, meth = lws_http_get_uri_and_method(wsi, &uptr, &l);
+
+		if (wsi->h2_stream_carries_ws)
+			wsi->http.request_version = HTTP_VERSION_2;
+
+		wsi->http.access_log.response = 101;
+
+		l = lws_snprintf(combo, sizeof(combo), "%.*s (%s)", l, uptr,
+				 wsi->protocol->name);
+
+		lws_prepare_access_log_info(wsi, combo, l, meth);
+		lws_access_log(wsi);
+	}
+#endif
+
 	lwsl_info("%s: %p: dropping ah on ws upgrade\n", __func__, wsi);
 	lws_header_table_detach(wsi, 1);
 
 	return 0;
+}
+
+int
+lws_process_ws_upgrade(struct lws *wsi)
+{
+	const struct lws_protocols *pcol = NULL;
+	char buf[128], name[64];
+	struct lws_tokenize ts;
+	lws_tokenize_elem e;
+
+	if (!wsi->protocol)
+		lwsl_err("NULL protocol at lws_read\n");
+
+	/*
+	 * It's either websocket or h2->websocket
+	 *
+	 * If we are on h1, confirm we got the required "connection: upgrade"
+	 * header.  h2 / ws-over-h2 does not have this.
+	 */
+
+#if defined(LWS_WITH_HTTP2)
+	if (!wsi->http2_substream) {
+#endif
+
+		lws_tokenize_init(&ts, buf, LWS_TOKENIZE_F_COMMA_SEP_LIST |
+					    LWS_TOKENIZE_F_DOT_NONTERM |
+					    LWS_TOKENIZE_F_RFC7230_DELIMS |
+					    LWS_TOKENIZE_F_MINUS_NONTERM);
+		ts.len = lws_hdr_copy(wsi, buf, sizeof(buf) - 1,
+				      WSI_TOKEN_CONNECTION);
+		if (ts.len <= 0)
+			goto bad_conn_format;
+
+		do {
+			e = lws_tokenize(&ts);
+			switch (e) {
+			case LWS_TOKZE_TOKEN:
+				if (!strncasecmp(ts.token, "upgrade", ts.token_len))
+					e = LWS_TOKZE_ENDED;
+				break;
+
+			case LWS_TOKZE_DELIMITER:
+				break;
+
+			default: /* includes ENDED */
+	bad_conn_format:
+				lwsl_err("%s: malformed or absent conn hdr\n",
+					 __func__);
+
+				return 1;
+			}
+		} while (e > 0);
+
+#if defined(LWS_WITH_HTTP2)
+	}
+#endif
+
+#if defined(LWS_WITH_HTTP_PROXY)
+	{
+		const struct lws_http_mount *hit;
+		int uri_len = 0, meth;
+		char *uri_ptr;
+
+		meth = lws_http_get_uri_and_method(wsi, &uri_ptr, &uri_len);
+		hit = lws_find_mount(wsi, uri_ptr, uri_len);
+
+		if (hit && (meth == 0 || meth == 8) &&
+		    (hit->origin_protocol == LWSMPRO_HTTPS ||
+		     hit->origin_protocol == LWSMPRO_HTTP))
+			/*
+			 * We are an h1 ws upgrade on a urlpath that corresponds
+			 * to a proxying mount.  Don't try to deal with it
+			 * locally, eg, we won't even have the right protocol
+			 * handler since we're not the guy handling it, just a
+			 * conduit.
+			 *
+			 * Instead open the related ongoing h1 connection
+			 * according to the mount configuration and proxy
+			 * whatever that has to say from now on.
+			 */
+			return lws_http_proxy_start(wsi, hit, uri_ptr, 1);
+	}
+#endif
+
+	/*
+	 * Select the first protocol we support from the list
+	 * the client sent us.
+	 */
+
+	lws_tokenize_init(&ts, buf, LWS_TOKENIZE_F_COMMA_SEP_LIST |
+				    LWS_TOKENIZE_F_MINUS_NONTERM |
+				    LWS_TOKENIZE_F_DOT_NONTERM |
+				    LWS_TOKENIZE_F_RFC7230_DELIMS);
+	ts.len = lws_hdr_copy(wsi, buf, sizeof(buf) - 1, WSI_TOKEN_PROTOCOL);
+	if (ts.len < 0) {
+		lwsl_err("%s: protocol list too long\n", __func__);
+		return 1;
+	}
+	if (!ts.len) {
+		int n = wsi->vhost->default_protocol_index;
+		/*
+		 * Some clients only have one protocol and do not send the
+		 * protocol list header... allow it and match to the vhost's
+		 * default protocol (which itself defaults to zero).
+		 *
+		 * Setting the vhost default protocol index to -1 or anything
+		 * more than the actual number of protocols on the vhost causes
+		 * these "no protocol" ws connections to be rejected.
+		 */
+
+		if (n >= wsi->vhost->count_protocols) {
+			lwsl_notice("%s: rejecting ws upg with no protocol\n",
+				    __func__);
+
+			return 1;
+		}
+
+		lwsl_info("%s: defaulting to prot handler %d\n", __func__, n);
+
+		lws_bind_protocol(wsi, &wsi->vhost->protocols[n],
+				  "ws upgrade default pcol");
+
+		goto alloc_ws;
+	}
+
+	/* otherwise go through the user-provided protocol list */
+
+	do {
+		e = lws_tokenize(&ts);
+		switch (e) {
+		case LWS_TOKZE_TOKEN:
+
+			if (lws_tokenize_cstr(&ts, name, sizeof(name))) {
+				lwsl_err("%s: pcol name too long\n", __func__);
+
+				return 1;
+			}
+			lwsl_debug("checking %s\n", name);
+			pcol = lws_vhost_name_to_protocol(wsi->vhost, name);
+			if (pcol) {
+				/* if we know it, bind to it and stop looking */
+				lws_bind_protocol(wsi, pcol, "ws upg pcol");
+				e = LWS_TOKZE_ENDED;
+			}
+			break;
+
+		case LWS_TOKZE_DELIMITER:
+		case LWS_TOKZE_ENDED:
+			break;
+
+		default:
+			lwsl_err("%s: malformatted protocol list", __func__);
+
+			return 1;
+		}
+	} while (e > 0);
+
+	/* we didn't find a protocol he wanted? */
+
+	if (!pcol) {
+		lwsl_notice("No supported protocol \"%s\"\n", buf);
+
+		return 1;
+	}
+
+alloc_ws:
+
+	return lws_process_ws_upgrade2(wsi);
 }
 
 int
@@ -555,8 +622,15 @@ handshake_0405(struct lws_context *context, struct lws *wsi)
 	    /*  - it is not an empty string */
 	    wsi->protocol->name &&
 	    wsi->protocol->name[0]) {
+		const char *prot = wsi->protocol->name;
+
+#if defined(LWS_WITH_HTTP_PROXY)
+		if (wsi->proxied_ws_parent && wsi->child_list)
+			prot = wsi->child_list->ws->actual_protocol;
+#endif
+
 		LWS_CPYAPP(p, "\x0d\x0aSec-WebSocket-Protocol: ");
-		p += lws_snprintf(p, 128, "%s", wsi->protocol->name);
+		p += lws_snprintf(p, 128, "%s", prot);
 	}
 
 #if !defined(LWS_WITHOUT_EXTENSIONS)
@@ -633,9 +707,9 @@ bail:
 static int
 lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 {
+	struct lws_ext_pm_deflate_rx_ebufs pmdrx;
 	unsigned int avail = (unsigned int)len;
 	uint8_t *buffer = *buf, mask[4];
-	struct lws_tokens ebuf;
 #if !defined(LWS_WITHOUT_EXTENSIONS)
 	unsigned int old_packet_length = (int)wsi->ws->rx_packet_length;
 #endif
@@ -670,10 +744,10 @@ lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 	if (!avail)
 		return 0;
 
-	ebuf.token = (char *)buffer;
-	ebuf.len = avail;
-
-	//lwsl_hexdump_notice(ebuf.token, ebuf.len);
+	pmdrx.eb_in.token = buffer;
+	pmdrx.eb_in.len = avail;
+	pmdrx.eb_out.token = buffer;
+	pmdrx.eb_out.len = avail;
 
 	if (!wsi->ws->all_zero_nonce) {
 
@@ -706,30 +780,28 @@ lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 
 	(*buf) += avail;
 	len -= avail;
+	wsi->ws->rx_packet_length -= avail;
 
 #if !defined(LWS_WITHOUT_EXTENSIONS)
-	n = lws_ext_cb_active(wsi, LWS_EXT_CB_PAYLOAD_RX, &ebuf, 0);
-	lwsl_info("%s: ext says %d / ebuf.len %d\n", __func__,  n, ebuf.len);
-#endif
+	n = lws_ext_cb_active(wsi, LWS_EXT_CB_PAYLOAD_RX, &pmdrx, 0);
+	lwsl_info("%s: ext says %d / ebuf_out.len %d\n", __func__,  n,
+			pmdrx.eb_out.len);
+
 	/*
 	 * ebuf may be pointing somewhere completely different now,
 	 * it's the output
 	 */
 
-#if !defined(LWS_WITHOUT_EXTENSIONS)
 	if (n < 0) {
 		/*
 		 * we may rely on this to get RX, just drop connection
 		 */
 		lwsl_notice("%s: LWS_EXT_CB_PAYLOAD_RX blew out\n", __func__);
 		wsi->socket_is_permanently_unusable = 1;
+
 		return -1;
 	}
-#endif
 
-	wsi->ws->rx_packet_length -= avail;
-
-#if !defined(LWS_WITHOUT_EXTENSIONS)
 	/*
 	 * if we had an rx fragment right at the last compressed byte of the
 	 * message, we can get a zero length inflated output, where no prior
@@ -740,14 +812,15 @@ lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 	 * as the message completion.
 	 */
 
-	if (!ebuf.len &&		      /* zero-length inflation output */
-	    !n &&		   /* nothing left to drain from the inflator */
-	    wsi->ws->count_act_ext &&			  /* we are using pmd */
+	if (!pmdrx.eb_out.len &&	      /* zero-length inflation output */
+	    n == PMDR_EMPTY_FINAL &&    /* nothing to drain from the inflator */
 	    old_packet_length &&	    /* we gave the inflator new input */
 	    !wsi->ws->rx_packet_length &&   /* raw ws packet payload all gone */
 	    wsi->ws->final &&		    /* the raw ws packet is a FIN guy */
 	    wsi->protocol->callback &&
 	    !wsi->wsistate_pre_close) {
+
+		lwsl_ext("%s: issuing zero length FIN pkt\n", __func__);
 
 		if (user_callback_handle_rxflow(wsi->protocol->callback, wsi,
 						LWS_CALLBACK_RECEIVE,
@@ -756,24 +829,26 @@ lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 
 		return avail;
 	}
-#endif
 
-	if (!ebuf.len)
+	/*
+	 * If doing permessage-deflate, above was the only way to get a zero
+	 * length receive.  Otherwise we're more willing.
+	 */
+	if (wsi->ws->count_act_ext && !pmdrx.eb_out.len)
 		return avail;
 
-	if (
-#if !defined(LWS_WITHOUT_EXTENSIONS)
-	    n &&
-#endif
-	    ebuf.len)
+	if (n == PMDR_HAS_PENDING)
 		/* extension had more... main loop will come back */
 		lws_add_wsi_to_draining_ext_list(wsi);
 	else
 		lws_remove_wsi_from_draining_ext_list(wsi);
+#endif
 
-	if (wsi->ws->check_utf8 && !wsi->ws->defeat_check_utf8) {
+	if (pmdrx.eb_out.len &&
+	    wsi->ws->check_utf8 && !wsi->ws->defeat_check_utf8) {
 		if (lws_check_utf8(&wsi->ws->utf8,
-				   (unsigned char *)ebuf.token, ebuf.len)) {
+				   pmdrx.eb_out.token,
+				   pmdrx.eb_out.len)) {
 			lws_close_reason(wsi, LWS_CLOSE_STATUS_INVALID_PAYLOAD,
 					 (uint8_t *)"bad utf8", 8);
 			goto utf8_fail;
@@ -788,7 +863,7 @@ lws_ws_frame_rest_is_payload(struct lws *wsi, uint8_t **buf, size_t len)
 
 utf8_fail:
 			lwsl_info("utf8 error\n");
-			lwsl_hexdump_info(ebuf.token, ebuf.len);
+			lwsl_hexdump_info(pmdrx.eb_out.token, pmdrx.eb_out.len);
 
 			return -1;
 		}
@@ -798,14 +873,16 @@ utf8_fail:
 		if (user_callback_handle_rxflow(wsi->protocol->callback, wsi,
 						LWS_CALLBACK_RECEIVE,
 						wsi->user_space,
-						ebuf.token, ebuf.len))
+						pmdrx.eb_out.token,
+						pmdrx.eb_out.len))
 			return -1;
 
 	wsi->ws->first_fragment = 0;
 
 #if !defined(LWS_WITHOUT_EXTENSIONS)
 	lwsl_info("%s: input used %d, output %d, rem len %d, rx_draining_ext %d\n",
-		  __func__, avail, ebuf.len, (int)len, wsi->ws->rx_draining_ext);
+		  __func__, avail, pmdrx.eb_out.len, (int)len,
+		  wsi->ws->rx_draining_ext);
 #endif
 
 	return avail; /* how much we used from the input */
@@ -815,6 +892,7 @@ utf8_fail:
 int
 lws_parse_ws(struct lws *wsi, unsigned char **buf, size_t len)
 {
+	unsigned char *bufin = *buf;
 	int m, bulk = 0;
 
 	lwsl_debug("%s: received %d byte packet\n", __func__, (int)len);
@@ -828,10 +906,32 @@ lws_parse_ws(struct lws *wsi, unsigned char **buf, size_t len)
 		 * we were accepting input but now we stopped doing so
 		 */
 		if (wsi->rxflow_bitmap) {
-			lwsl_info("%s: doing rxflow\n", __func__);
-			lws_rxflow_cache(wsi, *buf, 0, (int)len);
-			lwsl_parser("%s: cached %ld\n", __func__, (long)len);
-			*buf += len; /* stashing it is taking care of it */
+			lwsl_info("%s: doing rxflow, caching %d\n", __func__,
+				(int)len);
+			/*
+			 * Since we cached the remaining available input, we
+			 * can say we "consumed" it.
+			 *
+			 * But what about the case where the available input
+			 * came out of the rxflow cache already?  If we are
+			 * effectively "putting it back in the cache", we have
+			 * leave it where it is, already pointed to by the head.
+			 */
+			if (lws_rxflow_cache(wsi, *buf, 0, (int)len) ==
+							LWSRXFC_TRIMMED) {
+				/*
+				 * We dealt with it by trimming the existing
+				 * rxflow cache HEAD to account for what we used.
+				 *
+				 * indicate we didn't use anything to the caller
+				 * so he doesn't do any consumed processing
+				 */
+				lwsl_info("%s: trimming inside rxflow cache\n",
+					  __func__);
+				*buf = bufin;
+			} else
+				*buf += len;
+
 			return 1;
 		}
 #if !defined(LWS_WITHOUT_EXTENSIONS)
@@ -884,7 +984,7 @@ lws_parse_ws(struct lws *wsi, unsigned char **buf, size_t len)
 				   wsi->ws->rx_draining_ext);
 #endif
 			m = lws_ws_rx_sm(wsi, ALREADY_PROCESSED_IGNORE_CHAR |
-					 ALREADY_PROCESSED_NO_CB, 0);
+					      ALREADY_PROCESSED_NO_CB, 0);
 		}
 
 		if (m < 0) {

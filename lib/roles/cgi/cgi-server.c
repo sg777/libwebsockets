@@ -1,25 +1,30 @@
 /*
- * libwebsockets - CGI management
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2017 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#define  _GNU_SOURCE
+
+#include "private-lib-core.h"
 
 #if defined(WIN32) || defined(_WIN32)
 #else
@@ -135,6 +140,11 @@ lws_cgi(struct lws *wsi, const char * const *exec_array,
 	sum = cgi->summary;
 	sumend = sum + strlen(cgi->summary) - 1;
 
+	for (n = 0; n < 3; n++) {
+		cgi->pipe_fds[n][0] = -1;
+		cgi->pipe_fds[n][1] = -1;
+	}
+
 	/* create pipes for [stdin|stdout] and [stderr] */
 
 	for (n = 0; n < 3; n++)
@@ -145,12 +155,14 @@ lws_cgi(struct lws *wsi, const char * const *exec_array,
 
 	for (n = 0; n < 3; n++) {
 		cgi->stdwsi[n] = lws_create_basic_wsi(wsi->context, wsi->tsi);
-		if (!cgi->stdwsi[n])
+		if (!cgi->stdwsi[n]) {
+			lwsl_err("%s: unable to create cgi stdwsi\n", __func__);
 			goto bail2;
+		}
 		cgi->stdwsi[n]->cgi_channel = n;
 		lws_vhost_bind_wsi(wsi->vhost, cgi->stdwsi[n]);
 
-		lwsl_debug("%s: cgi %p: pipe fd %d -> fd %d / %d\n", __func__,
+		lwsl_debug("%s: cgi stdwsi %p: pipe idx %d -> fd %d / %d\n", __func__,
 			   cgi->stdwsi[n], n, cgi->pipe_fds[n][!!(n == 0)],
 			   cgi->pipe_fds[n][!(n == 0)]);
 
@@ -175,9 +187,12 @@ lws_cgi(struct lws *wsi, const char * const *exec_array,
 		wsi->child_list = cgi->stdwsi[n];
 	}
 
-	lws_change_pollfd(cgi->stdwsi[LWS_STDIN], LWS_POLLIN, LWS_POLLOUT);
-	lws_change_pollfd(cgi->stdwsi[LWS_STDOUT], LWS_POLLOUT, LWS_POLLIN);
-	lws_change_pollfd(cgi->stdwsi[LWS_STDERR], LWS_POLLOUT, LWS_POLLIN);
+	if (lws_change_pollfd(cgi->stdwsi[LWS_STDIN], LWS_POLLIN, LWS_POLLOUT))
+		goto bail3;
+	if (lws_change_pollfd(cgi->stdwsi[LWS_STDOUT], LWS_POLLOUT, LWS_POLLIN))
+		goto bail3;
+	if (lws_change_pollfd(cgi->stdwsi[LWS_STDERR], LWS_POLLOUT, LWS_POLLIN))
+		goto bail3;
 
 	lwsl_debug("%s: fds in %d, out %d, err %d\n", __func__,
 		   cgi->stdwsi[LWS_STDIN]->desc.sockfd,
@@ -504,14 +519,14 @@ bail3:
 		__remove_wsi_socket_from_fds(wsi->http.cgi->stdwsi[n]);
 bail2:
 	for (n = 0; n < 3; n++)
-		if (wsi->http.cgi->stdwsi[n] > 0)
+		if (wsi->http.cgi->stdwsi[n])
 			__lws_free_wsi(cgi->stdwsi[n]);
 
 bail1:
 	for (n = 0; n < 3; n++) {
-		if (cgi->pipe_fds[n][0] > 0)
+		if (cgi->pipe_fds[n][0] >= 0)
 			close(cgi->pipe_fds[n][0]);
-		if (cgi->pipe_fds[n][1] > 0)
+		if (cgi->pipe_fds[n][1] >= 0)
 			close(cgi->pipe_fds[n][1]);
 	}
 
@@ -543,7 +558,7 @@ LWS_VISIBLE LWS_EXTERN int
 lws_cgi_write_split_stdout_headers(struct lws *wsi)
 {
 	int n, m, cmd;
-	unsigned char buf[LWS_PRE + 1024], *start = &buf[LWS_PRE], *p = start,
+	unsigned char buf[LWS_PRE + 4096], *start = &buf[LWS_PRE], *p = start,
 			*end = &buf[sizeof(buf) - 1 - LWS_PRE], *name,
 			*value = NULL;
 	char c, hrs;
@@ -934,6 +949,20 @@ agin:
 			n += m + 2;
 		}
 		*/
+
+#if defined(LWS_WITH_HTTP2)
+		if (wsi->http2_substream) {
+			struct lws *nwsi = lws_get_network_wsi(wsi);
+
+			__lws_set_timeout(wsi,
+				PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, 31);
+
+			if (!nwsi->immortal_substream_count)
+				__lws_set_timeout(nwsi,
+					PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, 31);
+		}
+#endif
+
 		cmd = LWS_WRITE_HTTP;
 		if (wsi->http.cgi->content_length_seen + n ==
 						wsi->http.cgi->content_length)

@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2019 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #ifndef LWS_BUILD_HASH
 #define LWS_BUILD_HASH "unknown-build-hash"
@@ -41,20 +44,50 @@ lws_get_library_version(void)
 	return library_version;
 }
 
+#if defined(LWS_WITH_STATS)
+static void
+lws_sul_stats_cb(lws_sorted_usec_list_t *sul)
+{
+	struct lws_context_per_thread *pt = lws_container_of(sul,
+			struct lws_context_per_thread, sul_stats);
+
+	lws_stats_log_dump(pt->context);
+
+	__lws_sul_insert(&pt->pt_sul_owner, &pt->sul_stats, 10 * LWS_US_PER_SEC);
+}
+#endif
+#if defined(LWS_WITH_PEER_LIMITS)
+static void
+lws_sul_peer_limits_cb(lws_sorted_usec_list_t *sul)
+{
+	struct lws_context_per_thread *pt = lws_container_of(sul,
+			struct lws_context_per_thread, sul_peer_limits);
+
+	lws_peer_cull_peer_wait_list(pt->context);
+
+	__lws_sul_insert(&pt->pt_sul_owner, &pt->sul_peer_limits, 10 * LWS_US_PER_SEC);
+}
+#endif
+
+
 LWS_VISIBLE struct lws_context *
 lws_create_context(const struct lws_context_creation_info *info)
 {
 	struct lws_context *context = NULL;
+#if defined(LWS_WITH_FILE_OPS)
 	struct lws_plat_file_ops *prev;
+#endif
 #ifndef LWS_NO_DAEMONIZE
 	pid_t pid_daemon = get_daemonize_pid();
 #endif
 #if defined(LWS_WITH_NETWORK)
-	int n;
+	int n, count_threads = 1;
+	uint8_t *u;
 #endif
 #if defined(__ANDROID__)
 	struct rlimit rt;
 #endif
+	size_t s1 = 4096, size = sizeof(struct lws_context);
 
 	lwsl_info("Initial logging level %d\n", log_level);
 	lwsl_info("Libwebsockets version: %s\n", library_version);
@@ -69,7 +102,6 @@ lws_create_context(const struct lws_context_creation_info *info)
 #endif
 
 	lwsl_info(" LWS_DEF_HEADER_LEN    : %u\n", LWS_DEF_HEADER_LEN);
-	lwsl_info(" LWS_MAX_PROTOCOLS     : %u\n", LWS_MAX_PROTOCOLS);
 	lwsl_info(" LWS_MAX_SMP           : %u\n", LWS_MAX_SMP);
 	lwsl_info(" sizeof (*info)        : %ld\n", (long)sizeof(*info));
 #if defined(LWS_WITH_STATS)
@@ -84,12 +116,46 @@ lws_create_context(const struct lws_context_creation_info *info)
 	if (lws_plat_context_early_init())
 		return NULL;
 
-	context = lws_zalloc(sizeof(struct lws_context), "context");
+#if defined(LWS_WITH_NETWORK)
+	if (info->count_threads)
+		count_threads = info->count_threads;
+
+	if (count_threads > LWS_MAX_SMP)
+		count_threads = LWS_MAX_SMP;
+
+	if (info->pt_serv_buf_size)
+		s1 = info->pt_serv_buf_size;
+
+	/* pt fakewsi and the pt serv buf allocations ride after the context */
+	size += count_threads * (s1 + sizeof(struct lws));
+#endif
+
+	context = lws_zalloc(size, "context");
 	if (!context) {
 		lwsl_err("No memory for websocket context\n");
 		return NULL;
 	}
-lwsl_info("context created\n");
+
+	context->uid = info->uid;
+	context->gid = info->gid;
+	context->username = info->username;
+	context->groupname = info->groupname;
+	context->system_ops = info->system_ops;
+	context->pt_serv_buf_size = s1;
+#if defined(LWS_WITH_NETWORK)
+	context->count_threads = count_threads;
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	context->detailed_latency_cb = info->detailed_latency_cb;
+	context->detailed_latency_filepath = info->detailed_latency_filepath;
+	context->latencies_fd = -1;
+#endif
+#endif
+
+	/* if he gave us names, set the uid / gid */
+	if (lws_plat_drop_app_privileges(context, 0))
+		goto bail;
+
+	lwsl_info("context created\n");
 #if defined(LWS_WITH_TLS) && defined(LWS_WITH_NETWORK)
 #if defined(LWS_WITH_MBEDTLS)
 	context->tls_ops = &tls_ops_mbedtls;
@@ -98,10 +164,6 @@ lwsl_info("context created\n");
 #endif
 #endif
 
-	if (info->pt_serv_buf_size)
-		context->pt_serv_buf_size = info->pt_serv_buf_size;
-	else
-		context->pt_serv_buf_size = 4096;
 
 #if defined(LWS_ROLE_H2)
 	role_ops_h2.init_context(context, info);
@@ -111,10 +173,15 @@ lwsl_info("context created\n");
 	lws_mutex_refcount_init(&context->mr);
 #endif
 
-#if defined(LWS_WITH_ESP32)
+#if defined(LWS_PLAT_FREERTOS)
+#if defined(LWS_AMAZON_RTOS)
+	context->last_free_heap = xPortGetFreeHeapSize();
+#else
 	context->last_free_heap = esp_get_free_heap_size();
 #endif
+#endif
 
+#if defined(LWS_WITH_FILE_OPS)
 	/* default to just the platform fops implementation */
 
 	context->fops_platform.LWS_FOP_OPEN	= _lws_plat_file_open;
@@ -145,18 +212,23 @@ lwsl_info("context created\n");
 	/* if user provided fops, tack them on the end of the list */
 	if (info->fops)
 		prev->next = info->fops;
+#endif
 
+#if defined(LWS_WITH_SERVER)
 	context->reject_service_keywords = info->reject_service_keywords;
+#endif
 	if (info->external_baggage_free_on_destroy)
 		context->external_baggage_free_on_destroy =
 			info->external_baggage_free_on_destroy;
 #if defined(LWS_WITH_NETWORK)
-	context->time_up = time(NULL);
+	context->time_up = lws_now_usecs();
 #endif
 	context->pcontext_finalize = info->pcontext;
 
 	context->simultaneous_ssl_restriction =
 			info->simultaneous_ssl_restriction;
+
+	context->options = info->options;
 
 #ifndef LWS_NO_DAEMONIZE
 	if (pid_daemon) {
@@ -165,27 +237,43 @@ lwsl_info("context created\n");
 	}
 #endif
 #if defined(__ANDROID__)
-		n = getrlimit ( RLIMIT_NOFILE,&rt);
-		if (-1 == n) {
-			lwsl_err("Get RLIMIT_NOFILE failed!\n");
-			return NULL;
-		}
-		context->max_fds = rt.rlim_cur;
+	n = getrlimit(RLIMIT_NOFILE, &rt);
+	if (n == -1) {
+		lwsl_err("Get RLIMIT_NOFILE failed!\n");
+
+		return NULL;
+	}
+	context->max_fds = rt.rlim_cur;
 #else
-		context->max_fds = getdtablesize();
+#if defined(WIN32) || defined(_WIN32) || defined(LWS_AMAZON_RTOS)
+	context->max_fds = getdtablesize();
+#else
+	context->max_fds = sysconf(_SC_OPEN_MAX);
+#endif
 #endif
 
-	if (info->count_threads)
-		context->count_threads = info->count_threads;
-	else
-		context->count_threads = 1;
+	if (context->max_fds < 0) {
+		lwsl_err("%s: problem getting process max files\n",
+			 __func__);
 
-	if (context->count_threads > LWS_MAX_SMP)
-		context->count_threads = LWS_MAX_SMP;
+		return NULL;
+	}
+
+	/*
+	 * deal with any max_fds override, if it's reducing (setting it to
+	 * more than ulimit -n is meaningless).  The platform init will
+	 * figure out what if this is something it can deal with.
+	 */
+	if (info->fd_limit_per_thread) {
+		int mf = info->fd_limit_per_thread * context->count_threads;
+
+		if (mf < context->max_fds) {
+			context->max_fds_unrelated_to_ulimit = 1;
+			context->max_fds = mf;
+		}
+	}
 
 	context->token_limits = info->token_limits;
-
-	context->options = info->options;
 
 #if defined(LWS_WITH_NETWORK)
 
@@ -289,22 +377,34 @@ lwsl_info("context created\n");
 	 * Allocate the per-thread storage for scratchpad buffers,
 	 * and header data pool
 	 */
+	u = (uint8_t *)&context[1];
 	for (n = 0; n < context->count_threads; n++) {
-		context->pt[n].serv_buf = lws_malloc(context->pt_serv_buf_size,
-						     "pt_serv_buf");
-		if (!context->pt[n].serv_buf) {
-			lwsl_err("OOM\n");
-			return NULL;
-		}
+		context->pt[n].serv_buf = u;
+		u += context->pt_serv_buf_size;
 
 		context->pt[n].context = context;
 		context->pt[n].tid = n;
+
+		/*
+		 * We overallocated for a fakewsi (can't compose it in the
+		 * pt because size isn't known at that time).  point to it
+		 * and zero it down.  Fakewsis are needed to make callbacks work
+		 * when the source of the callback is not actually from a wsi
+		 * context.
+		 */
+		context->pt[n].fake_wsi = (struct lws *)u;
+		u += sizeof(struct lws);
+
+		memset(context->pt[n].fake_wsi, 0, sizeof(struct lws));
 
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 		context->pt[n].http.ah_list = NULL;
 		context->pt[n].http.ah_pool_length = 0;
 #endif
 		lws_pt_mutex_init(&context->pt[n]);
+#if defined(LWS_WITH_SEQUENCER)
+		lws_seq_pt_init(&context->pt[n]);
+#endif
 	}
 
 	lwsl_info(" Threads: %d each %d fds\n", context->count_threads,
@@ -337,15 +437,16 @@ lwsl_info("context created\n");
 		  (long)context->count_threads,
 		  context->pt_serv_buf_size);
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
-	lwsl_info(" mem: http hdr rsvd:   %5lu B (%u thr x (%u + %lu) x %u))\n",
-		    (long)(context->max_http_header_data +
-		     sizeof(struct allocated_headers)) *
-		    context->max_http_header_pool * context->count_threads,
-		    context->count_threads,
+	lwsl_info(" mem: http hdr size:   (%u + %lu), max count %u\n",
 		    context->max_http_header_data,
 		    (long)sizeof(struct allocated_headers),
 		    context->max_http_header_pool);
 #endif
+
+	/*
+	 * fds table contains pollfd structs for as many pollfds as we can
+	 * handle... spread across as many service threads as we have going
+	 */
 	n = sizeof(struct lws_pollfd) * context->count_threads *
 	    context->fd_limit_per_thread;
 	context->pt[0].fds = lws_zalloc(n, "fds table");
@@ -353,13 +454,15 @@ lwsl_info("context created\n");
 		lwsl_err("OOM allocating %d fds\n", context->max_fds);
 		goto bail;
 	}
-	lwsl_info(" mem: pollfd map:      %5u\n", n);
+	lwsl_info(" mem: pollfd map:      %5u B\n", n);
 #endif
+#if defined(LWS_WITH_SERVER)
 	if (info->server_string) {
 		context->server_string = info->server_string;
 		context->server_string_len = (short)
 				strlen(context->server_string);
 	}
+#endif
 
 #if LWS_MAX_SMP > 1
 	/* each thread serves his own chunk of fds */
@@ -388,8 +491,10 @@ lwsl_info("context created\n");
 				goto bail;
 		}
 
+#if !defined(LWS_AMAZON_RTOS)
 	if (lws_create_event_pipes(context))
 		goto bail;
+#endif
 #endif
 
 	lws_context_init_ssl_library(info);
@@ -403,8 +508,7 @@ lwsl_info("context created\n");
 	if (!lws_check_opt(info->options, LWS_SERVER_OPTION_EXPLICIT_VHOSTS))
 		if (!lws_create_vhost(context, info)) {
 			lwsl_err("Failed to create default vhost\n");
-			for (n = 0; n < context->count_threads; n++)
-				lws_free_set_NULL(context->pt[n].serv_buf);
+
 #if defined(LWS_WITH_PEER_LIMITS)
 			lws_free_set_NULL(context->pl_hash_table);
 #endif
@@ -419,13 +523,24 @@ lwsl_info("context created\n");
 	lwsl_info(" mem: per-conn:        %5lu bytes + protocol rx buf\n",
 		    (unsigned long)sizeof(struct lws));
 #endif
+
+#if defined(LWS_WITH_SERVER)
 	strcpy(context->canonical_hostname, "unknown");
 #if defined(LWS_WITH_NETWORK)
 	lws_server_get_canonical_hostname(context, info);
 #endif
+#endif
 
-	context->uid = info->uid;
-	context->gid = info->gid;
+#if defined(LWS_WITH_STATS)
+	context->pt[0].sul_stats.cb = lws_sul_stats_cb;
+	__lws_sul_insert(&context->pt[0].pt_sul_owner, &context->pt[0].sul_stats,
+			 10 * LWS_US_PER_SEC);
+#endif
+#if defined(LWS_WITH_PEER_LIMITS)
+	context->pt[0].sul_peer_limits.cb = lws_sul_peer_limits_cb;
+	__lws_sul_insert(&context->pt[0].pt_sul_owner,
+			 &context->pt[0].sul_peer_limits, 10 * LWS_US_PER_SEC);
+#endif
 
 #if defined(LWS_HAVE_SYS_CAPABILITY_H) && defined(LWS_HAVE_LIBCAP)
 	memcpy(context->caps, info->caps, sizeof(context->caps));
@@ -438,7 +553,8 @@ lwsl_info("context created\n");
 	 * listening, we don't want the power for anything else
 	 */
 	if (!lws_check_opt(info->options, LWS_SERVER_OPTION_EXPLICIT_VHOSTS))
-		lws_plat_drop_app_privileges(info);
+		if (lws_plat_drop_app_privileges(context, 1))
+			goto bail;
 
 #if defined(LWS_WITH_NETWORK)
 	/* expedite post-context init (eg, protocols) */
@@ -510,15 +626,17 @@ lws_context_destroy3(struct lws_context *context)
 #if defined(LWS_WITH_NETWORK)
 	int n;
 
+	lwsl_debug("%s\n", __func__);
+
 	for (n = 0; n < context->count_threads; n++) {
-#if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 		struct lws_context_per_thread *pt = &context->pt[n];
+		(void)pt;
+#if defined(LWS_WITH_SEQUENCER)
+		lws_seq_destroy_all_on_pt(pt);
 #endif
 
 		if (context->event_loop_ops->destroy_pt)
 			context->event_loop_ops->destroy_pt(context, n);
-
-		lws_free_set_NULL(context->pt[n].serv_buf);
 
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 		while (pt->http.ah_list)
@@ -526,9 +644,20 @@ lws_context_destroy3(struct lws_context *context)
 #endif
 	}
 
+#if defined(LWS_WITH_ASYNC_DNS)
+	lws_async_dns_deinit(&context->async_dns);
+#endif
+
 	if (context->pt[0].fds)
 		lws_free_set_NULL(context->pt[0].fds);
 #endif
+	lws_context_deinit_ssl_library(context);
+
+#if defined(LWS_WITH_DETAILED_LATENCIES)
+	if (context->latencies_fd != -1)
+		compatible_close(context->latencies_fd);
+#endif
+
 	lws_free(context);
 	lwsl_info("%s: ctx %p freed\n", __func__, context);
 
@@ -567,12 +696,16 @@ lws_context_destroy2(struct lws_context *context)
 		vh = vh1;
 	}
 
+	lwsl_debug("%p: post vh listl\n", __func__);
+
 	/* remove ourselves from the pending destruction list */
 
 	while (context->vhost_pending_destruction_list)
 		/* removes itself from list */
 		__lws_vhost_destroy2(context->vhost_pending_destruction_list);
 #endif
+
+	lwsl_debug("%p: post pdl\n", __func__);
 
 	lws_stats_log_dump(context);
 #if defined(LWS_WITH_NETWORK)
@@ -593,6 +726,8 @@ lws_context_destroy2(struct lws_context *context)
 	lws_free(context->pl_hash_table);
 #endif
 
+	lwsl_debug("%p: baggage\n", __func__);
+
 	if (context->external_baggage_free_on_destroy)
 		free(context->external_baggage_free_on_destroy);
 
@@ -611,10 +746,13 @@ lws_context_destroy2(struct lws_context *context)
 			return;
 		}
 
+	lwsl_debug("%p: post dc2\n", __func__);
+
 	if (!context->pt[0].event_loop_foreign) {
 		int n;
 		for (n = 0; n < context->count_threads; n++)
 			if (context->pt[n].inside_service) {
+				lwsl_debug("%p: bailing as inside service\n", __func__);
 				lws_context_unlock(context); /* } context --- */
 				return;
 			}
@@ -636,7 +774,6 @@ lws_context_destroy(struct lws_context *context)
 	volatile struct lws_foreign_thread_pollfd *ftp, *next;
 	volatile struct lws_context_per_thread *vpt;
 	struct lws_vhost *vh = NULL;
-	struct lws wsi;
 	int n, m;
 #endif
 
@@ -672,18 +809,11 @@ lws_context_destroy(struct lws_context *context)
 
 #if defined(LWS_WITH_NETWORK)
 	m = context->count_threads;
-	memset(&wsi, 0, sizeof(wsi));
-	wsi.context = context;
-
-#ifdef LWS_LATENCY
-	if (context->worst_latency_info[0])
-		lwsl_notice("Worst latency: %s\n", context->worst_latency_info);
-#endif
 
 	while (m--) {
 		struct lws_context_per_thread *pt = &context->pt[m];
-		vpt = (volatile struct lws_context_per_thread *)pt;
 
+		vpt = (volatile struct lws_context_per_thread *)pt;
 		ftp = vpt->foreign_pfd_list;
 		while (ftp) {
 			next = ftp->next;
@@ -752,5 +882,14 @@ lws_context_destroy(struct lws_context *context)
 	}
 #endif
 
+#if defined(LWS_PLAT_FREERTOS)
+#if defined(LWS_AMAZON_RTOS)
+	context->last_free_heap = xPortGetFreeHeapSize();
+#else
+	context->last_free_heap = esp_get_free_heap_size();
+#endif
+#endif
+
 	lws_context_destroy2(context);
 }
+

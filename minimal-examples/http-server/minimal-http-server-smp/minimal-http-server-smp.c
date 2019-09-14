@@ -1,7 +1,7 @@
 /*
  * lws-minimal-http-server-smp
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -56,6 +56,8 @@ void *thread_service(void *threadid)
 		;
 
 	pthread_exit(NULL);
+
+	return NULL;
 }
 
 void sigint_handler(int sig)
@@ -99,7 +101,7 @@ int main(int argc, const char **argv)
 		info.count_threads = COUNT_THREADS;
 
 	if (lws_cmdline_option(argc, argv, "-s")) {
-		info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
+		info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | LWS_SERVER_OPTION_REQUIRE_VALID_OPENSSL_CLIENT_CERT;
 		info.ssl_cert_filepath = "localhost-100y.cert";
 		info.ssl_private_key_filepath = "localhost-100y.key";
 	}

@@ -1,7 +1,7 @@
 /*
  * lws-api-test-lws_tokenize
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -15,6 +15,7 @@
 
 #include <libwebsockets.h>
 #include <string.h>
+#include <stdio.h>
 
 struct expected {
 	lws_tokenize_elem e;
@@ -157,6 +158,17 @@ struct expected expected1[] = {
 		{ LWS_TOKZE_DELIMITER, ".", 1 },
 		{ LWS_TOKZE_TOKEN, "com", 3 },
 		{ LWS_TOKZE_ENDED, "", 0 },
+	},
+	expected15[] = {
+		{ LWS_TOKZE_TOKEN, "close", 5 },
+		{ LWS_TOKZE_DELIMITER, ",", 1 },
+		{ LWS_TOKZE_TOKEN, "Upgrade", 7 },
+		{ LWS_TOKZE_ENDED, "", 0 },
+	},
+	expected16[] = {
+		{ LWS_TOKZE_TOKEN_NAME_EQUALS, "a", 1 },
+		{ LWS_TOKZE_TOKEN, "5", 1 },
+		{ LWS_TOKZE_ENDED, "", 0 },
 	}
 
 ;
@@ -226,6 +238,43 @@ struct tests tests[] = {
 		expected14, LWS_ARRAY_SIZE(expected14),
 		LWS_TOKENIZE_F_NO_FLOATS
 	},
+	{
+		"close,  Upgrade",
+		expected15, LWS_ARRAY_SIZE(expected15),
+		LWS_TOKENIZE_F_COMMA_SEP_LIST
+	},
+	{
+		"a=5", expected16, LWS_ARRAY_SIZE(expected16),
+		LWS_TOKENIZE_F_NO_INTEGERS
+	},
+};
+
+static const struct ipparser_tests {
+	const char	*test;
+	int		rlen;
+	uint8_t		b[16];
+} ipt[] = {
+	{ "2001:db8:85a3:0:0:8a2e:370:7334", 16,
+		{ 0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00,
+		  0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x34 } },
+
+	{ "2001:db8:85a3::8a2e:370:7334", 16,
+		{ 0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00,
+		  0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x34 } },
+
+	{ "::1", 16, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
+
+	{ "::",  16, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 } },
+
+	{ "::ffff:192.0.2.128", 16,
+		{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		  0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x02, 0x80 } },
+
+	{ "cats", -1, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
+
+	{ ":::1", -8, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
+
+	{ "0:0::0:1", 16, { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 } },
 };
 
 /*
@@ -254,6 +303,7 @@ int main(int argc, const char **argv)
 	struct lws_tokenize ts;
 	lws_tokenize_elem e;
 	const char *p;
+	uint8_t u[16];
 	int n, logs = LLL_USER | LLL_ERR | LLL_WARN | LLL_NOTICE
 			/* for LLL_ verbosity above NOTICE to be built into lws,
 			 * lws must have been configured and built with
@@ -278,6 +328,7 @@ int main(int argc, const char **argv)
 		int m = 0, in_fail = fail;
 		struct expected *exp = tests[n].exp;
 
+		memset(&ts, 0, sizeof(ts));
 		ts.start = tests[n].string;
 		ts.len = strlen(ts.start);
 		ts.flags = tests[n].flags;
@@ -307,7 +358,8 @@ int main(int argc, const char **argv)
 			if (e > 0 &&
 			    (ts.token_len != exp->len ||
 			     memcmp(exp->value, ts.token, exp->len))) {
-				lwsl_notice("fail token mismatch\n");
+				lwsl_notice("fail token mismatch %d %d %.*s\n",
+						ts.token_len, exp->len, ts.token_len, ts.token);
 				fail++;
 				break;
 			}
@@ -379,6 +431,29 @@ int main(int argc, const char **argv)
 		printf("\t}\n");
 	}
 
+	/* ip address parser helper */
+
+	for (n = 0; n < (int)LWS_ARRAY_SIZE(ipt); n++) {
+		int m = lws_parse_numeric_address(ipt[n].test, u, sizeof(u));
+
+		if (m != ipt[n].rlen) {
+			lwsl_err("%s: fail %s ret %d\n",
+					__func__, ipt[n].test, m);
+			fail++;
+			continue;
+		}
+
+		if (m > 0) {
+			if (memcmp(ipt[n].b, u, m)) {
+				lwsl_err("%s: fail %s compare\n", __func__,
+						ipt[n].test);
+				lwsl_hexdump_notice(u, m);
+				fail++;
+				continue;
+			}
+		}
+		ok++;
+	}
 
 	lwsl_user("Completed: PASS: %d, FAIL: %d\n", ok, fail);
 

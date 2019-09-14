@@ -1,7 +1,7 @@
 /*
  * lws-minimal-ws-server
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -120,7 +120,7 @@ int main(int argc, const char **argv)
 	/* start the threads that create content */
 
 	while (!interrupted)
-		if (lws_service(context, 1000))
+		if (lws_service(context, 0))
 			interrupted = 1;
 
 	lws_context_destroy(context);

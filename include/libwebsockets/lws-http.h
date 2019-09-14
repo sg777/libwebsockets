@@ -1,24 +1,25 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
- *
- * included from libwebsockets.h
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
 /* minimal space for typical headers and CSP stuff */
@@ -201,7 +202,7 @@ lws_chunked_html_process(struct lws_process_html_args *args,
  * points to .len chars containing that header content.
  */
 struct lws_tokens {
-	char *token; /**< pointer to start of the token */
+	unsigned char *token; /**< pointer to start of the token */
 	int len; /**< length of the token's value */
 };
 
@@ -323,6 +324,9 @@ enum lws_token_indexes {
 
 	/* parser state additions, no storage associated */
 	WSI_TOKEN_NAME_PART,
+#if defined(LWS_WITH_CUSTOM_HEADERS)
+	WSI_TOKEN_UNKNOWN_VALUE_PART,
+#endif
 	WSI_TOKEN_SKIPPING,
 	WSI_TOKEN_SKIPPING_SAW_CR,
 	WSI_PARSING_COMPLETE,
@@ -402,6 +406,47 @@ lws_hdr_copy(struct lws *wsi, char *dest, int len, enum lws_token_indexes h);
 LWS_VISIBLE LWS_EXTERN int
 lws_hdr_copy_fragment(struct lws *wsi, char *dest, int len,
 		      enum lws_token_indexes h, int frag_idx);
+
+/**
+ * lws_hdr_custom_length() - return length of a custom header
+ *
+ * \param wsi: websocket connection
+ * \param name: header string (including terminating :)
+ * \param nlen: length of name
+ *
+ * Lws knows about 100 common http headers, and parses them into indexes when
+ * it recognizes them.  When it meets a header that it doesn't know, it stores
+ * the name and value directly, and you can look them up using
+ * lws_hdr_custom_length() and lws_hdr_custom_copy().
+ *
+ * This api returns -1, or the length of the value part of the header if it
+ * exists.  Lws must be built with LWS_WITH_CUSTOM_HEADERS (on by default) to
+ * use this api.
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_hdr_custom_length(struct lws *wsi, const char *name, int nlen);
+
+/**
+ * lws_hdr_custom_copy() - copy value part of a custom header
+ *
+ * \param wsi: websocket connection
+ * \param dst: pointer to buffer to receive the copy
+ * \param len: number of bytes available at dst
+ * \param name: header string (including terminating :)
+ * \param nlen: length of name
+ *
+ * Lws knows about 100 common http headers, and parses them into indexes when
+ * it recognizes them.  When it meets a header that it doesn't know, it stores
+ * the name and value directly, and you can look them up using
+ * lws_hdr_custom_length() and lws_hdr_custom_copy().
+ *
+ * This api returns -1, or the length of the string it copied into dst if it
+ * was big enough to contain both the string and an extra terminating NUL. Lws
+ * must be built with LWS_WITH_CUSTOM_HEADERS (on by default) to use this api.
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_hdr_custom_copy(struct lws *wsi, char *dst, int len, const char *name,
+		    int nlen);
 
 /**
  * lws_get_urlarg_by_name() - return pointer to arg value if present
@@ -562,6 +607,32 @@ lws_add_http_common_headers(struct lws *wsi, unsigned int code,
 			    const char *content_type, lws_filepos_t content_len,
 			    unsigned char **p, unsigned char *end);
 
+/**
+ * lws_http_get_uri_and_method() - Get information on method and url
+ *
+ * \param wsi: the connection to get information on
+ * \param puri_ptr: points to pointer to set to url
+ * \param puri_len: points to int to set to uri length
+ *
+ * Returns -1 or method index
+ *
+ * GET      0
+ * POST     1
+ * OPTIONS  2
+ * PUT      3
+ * PATCH    4
+ * DELETE   5
+ * CONNECT  6
+ * HEAD     7
+ * :path    8
+ *
+ * If returns method, *puri_ptr is set to the method's URI string and *puri_len
+ * to its length
+ */
+
+LWS_VISIBLE LWS_EXTERN int LWS_WARN_UNUSED_RESULT
+lws_http_get_uri_and_method(struct lws *wsi, char **puri_ptr, int *puri_len);
+
 ///@}
 
 /*! \defgroup urlendec Urlencode and Urldecode
@@ -673,6 +744,24 @@ lws_http_headers_detach(struct lws *wsi);
  */
 LWS_VISIBLE LWS_EXTERN int
 lws_http_mark_sse(struct lws *wsi);
+
+/**
+ * lws_h2_client_stream_long_poll_rxonly() - h2 stream to immortal read-only
+ *
+ * \param wsi: h2 stream client wsi
+ *
+ * Send END_STREAM-flagged zero-length DATA frame to set client stream wsi into
+ * half-closed (local) and remote into half-closed (remote).  Set the client
+ * stream wsi to be immortal (not subject to timeouts).
+ *
+ * Used if the remote server supports immortal long poll to put the stream into
+ * a read-only state where it can wait as long as needed for rx.
+ *
+ * Returns 0 if the process (which happens asynchronously) started or non-zero
+ * if it wasn't an h2 stream.
+ */
+LWS_VISIBLE LWS_EXTERN int
+lws_h2_client_stream_long_poll_rxonly(struct lws *wsi);
 
 /**
  * lws_http_compression_apply() - apply an http compression transform

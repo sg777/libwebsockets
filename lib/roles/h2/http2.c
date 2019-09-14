@@ -1,26 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-
-#include "core/private.h"
+#include "private-lib-core.h"
 
 /*
  * bitmap of control messages that are valid to receive for each http2 state
@@ -206,7 +208,9 @@ lws_wsi_server_new(struct lws_vhost *vh, struct lws *parent_wsi,
 	if (lws_ensure_user_space(wsi))
 		goto bail1;
 
+#if defined(LWS_WITH_SERVER_STATUS)
 	wsi->vhost->conn_stats.h2_subs++;
+#endif
 
 	lwsl_info("%s: %p new ch %p, sid %d, usersp=%p, tx cr %d, "
 		  "peer_credit %d (nwsi tx_cr %d)\n",
@@ -246,7 +250,7 @@ lws_wsi_h2_adopt(struct lws *parent_wsi, struct lws *wsi)
 	/* sid is set just before issuing the headers, ensuring monoticity */
 
 	wsi->seen_nonpseudoheader = 0;
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 	wsi->client_h2_substream = 1;
 #endif
 	wsi->h2.initialized = 1;
@@ -271,7 +275,9 @@ lws_wsi_h2_adopt(struct lws *parent_wsi, struct lws *wsi)
 
 	lws_callback_on_writable(wsi);
 
+#if defined(LWS_WITH_SERVER_STATUS)
 	wsi->vhost->conn_stats.h2_subs++;
+#endif
 
 	return wsi;
 
@@ -446,6 +452,17 @@ lws_h2_settings(struct lws *wsi, struct http2_settings *settings,
 					      "Inital Window beyond max");
 				return 1;
 			}
+
+#if defined(LWS_AMAZON_RTOS) || defined(LWS_AMAZON_LINUX)
+			//FIXME: Workaround for FIRMWARE-4632 until cloud-side issue is fixed.
+			if (b == 0x7fffffff) {
+				b = 65535;
+				lwsl_info("init window size 0x7fffffff\n");
+				break;
+			}
+			//FIXME: end of FIRMWARE-4632 workaround
+#endif
+
 			/*
 			 * In addition to changing the flow-control window for
 			 * streams that are not yet active, a SETTINGS frame
@@ -479,7 +496,7 @@ lws_h2_settings(struct lws *wsi, struct http2_settings *settings,
 					      "Frame size < initial");
 				return 1;
 			}
-			if (b > 0x007fffff) {
+			if (b > 0x00ffffff) {
 				lws_h2_goaway(nwsi, H2_ERR_PROTOCOL_ERROR,
 					      "Settings Frame size above max");
 				return 1;
@@ -672,7 +689,9 @@ int lws_h2_do_pps_send(struct lws *wsi)
 		/* this is the end of the preface dance then? */
 		if (lwsi_state(wsi) == LRS_H2_AWAIT_SETTINGS) {
 			lwsi_set_state(wsi, LRS_ESTABLISHED);
+#if defined(LWS_WITH_FILE_OPS)
 			wsi->http.fop_fd = NULL;
+#endif
 			if (lws_is_ssl(lws_get_network_wsi(wsi)))
 				break;
 			/*
@@ -698,11 +717,13 @@ int lws_h2_do_pps_send(struct lws *wsi)
 			h2n->swsi->h2.END_STREAM = 1;
 			lwsl_info("servicing initial http request\n");
 
+#if defined(LWS_WITH_SERVER_STATUS)
 			wsi->vhost->conn_stats.h2_trans++;
-
+#endif
+#if defined(LWS_WITH_SERVER)
 			if (lws_http_action(h2n->swsi))
 				goto bail;
-
+#endif
 			break;
 		}
 		break;
@@ -822,8 +843,11 @@ lws_h2_parse_frame_header(struct lws *wsi)
 	}
 
 	/* let the network wsi live a bit longer if subs are active */
+
 	if (!wsi->immortal_substream_count)
-		lws_set_timeout(wsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE, 31);
+		lws_set_timeout(wsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
+				wsi->vhost->keepalive_timeout ?
+					wsi->vhost->keepalive_timeout : 31);
 
 	if (h2n->sid)
 		h2n->swsi = lws_h2_wsi_from_id(wsi, h2n->sid);
@@ -857,7 +881,7 @@ lws_h2_parse_frame_header(struct lws *wsi)
 		/* if it's data, either way no swsi means CLOSED state */
 		if (h2n->type == LWS_H2_FRAME_TYPE_DATA) {
 			if (h2n->sid <= h2n->highest_sid_opened
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 					&& wsi->client_h2_alpn
 #endif
 			) {
@@ -1060,7 +1084,7 @@ lws_h2_parse_frame_header(struct lws *wsi)
 			return 1;
 		}
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 		if (wsi->client_h2_alpn) {
 			if (h2n->sid) {
 				h2n->swsi = lws_h2_wsi_from_id(wsi, h2n->sid);
@@ -1138,12 +1162,24 @@ lws_h2_parse_frame_header(struct lws *wsi)
 			assert(w->h2.sibling_list != w);
 		} lws_end_foreach_ll(w, h2.sibling_list);
 
+		if (lws_check_opt(h2n->swsi->vhost->options,
+			       LWS_SERVER_OPTION_VH_H2_HALF_CLOSED_LONG_POLL)) {
 
-		/* END_STREAM means after servicing this, close the stream */
-		h2n->swsi->h2.END_STREAM =
+			/*
+			 * We don't directly timeout streams that enter the
+			 * half-closed remote state, allowing immortal long
+			 * poll
+			 */
+			lws_http_mark_immortal(h2n->swsi);
+			lwsl_info("%s: %p: h2 stream entering long poll\n",
+					__func__, h2n->swsi);
+
+		} else {
+			h2n->swsi->h2.END_STREAM =
 					!!(h2n->flags & LWS_H2_FLAG_END_STREAM);
-		lwsl_info("%s: hdr END_STREAM = %d\n",__func__,
+			lwsl_debug("%s: hdr END_STREAM = %d\n",__func__,
 			  h2n->swsi->h2.END_STREAM);
+		}
 
 		h2n->cont_exp = !(h2n->flags & LWS_H2_FLAG_END_HEADERS);
 		h2n->cont_exp_sid = h2n->sid;
@@ -1185,6 +1221,20 @@ cleanup_wsi:
 
 	return 0;
 }
+
+static const char * const method_names[] = {
+	"GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "HEAD"
+};
+static unsigned char method_index[] = {
+	WSI_TOKEN_GET_URI,
+	WSI_TOKEN_POST_URI,
+	WSI_TOKEN_OPTIONS_URI,
+	WSI_TOKEN_PUT_URI,
+	WSI_TOKEN_PATCH_URI,
+	WSI_TOKEN_DELETE_URI,
+	WSI_TOKEN_CONNECT,
+	WSI_TOKEN_HEAD_URI,
+};
 
 /*
  * The last byte of the whole frame has been handled.
@@ -1231,14 +1281,15 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 
 	case LWS_H2_FRAME_TYPE_SETTINGS:
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 		if (wsi->client_h2_alpn &&
 		    !(h2n->flags & LWS_H2_FLAG_SETTINGS_ACK)) {
 			struct lws_h2_protocol_send *pps;
 
 			/* migrate original client ask on to substream 1 */
-
+#if defined(LWS_WITH_FILE_OPS)
 			wsi->http.fop_fd = NULL;
+#endif
 
 			/*
 			 * we need to treat the headers from the upgrade as the
@@ -1264,6 +1315,8 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 			h2n->swsi->client_h2_substream = 1;
 
 			h2n->swsi->protocol = wsi->protocol;
+			if (h2n->swsi->user_space && !h2n->swsi->user_space_externally_allocated)
+				lws_free(h2n->swsi->user_space);
 			h2n->swsi->user_space = wsi->user_space;
 			h2n->swsi->user_space_externally_allocated =
 					wsi->user_space_externally_allocated;
@@ -1296,17 +1349,16 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 
 			/* we have a transaction queue that wants to pipeline */
 			lws_vhost_lock(wsi->vhost);
-			lws_start_foreach_dll_safe(struct lws_dll_lws *, d, d1,
-				  wsi->dll_client_transaction_queue_head.next) {
+			lws_start_foreach_dll_safe(struct lws_dll2 *, d, d1,
+				  wsi->dll2_cli_txn_queue_owner.head) {
 				struct lws *w = lws_container_of(d, struct lws,
-						dll_client_transaction_queue);
+						dll2_cli_txn_queue);
 
 				if (lwsi_state(w) == LRS_H1C_ISSUE_HANDSHAKE2) {
 					lwsl_info("%s: cli pipeq %p to be h2\n",
 							__func__, w);
 					/* remove ourselves from client queue */
-					lws_dll_lws_remove(
-					      &w->dll_client_transaction_queue);
+					lws_dll2_remove(&w->dll2_cli_txn_queue);
 
 					/* attach ourselves as an h2 stream */
 					lws_wsi_h2_adopt(wsi, w);
@@ -1361,12 +1413,10 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 		lwsl_info("http req, wsi=%p, h2n->swsi=%p\n", wsi, h2n->swsi);
 		h2n->swsi->hdr_parsing_completed = 1;
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 		if (h2n->swsi->client_h2_substream) {
 			if (lws_client_interpret_server_handshake(h2n->swsi)) {
-				lws_h2_rst_stream(h2n->swsi,
-						  H2_ERR_STREAM_CLOSED,
-						  "protocol CLI_EST closed it");
+				lwsl_info("%s: cli int serv hs closed it\n", __func__);
 				break;
 			}
 		}
@@ -1433,7 +1483,7 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 			break;
 		}
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 		if (h2n->swsi->client_h2_substream) {
 			lwsl_info("%s: headers: client path\n", __func__);
 			break;
@@ -1467,12 +1517,21 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 		lws_http_compression_validate(h2n->swsi);
 #endif
 
+#if defined(LWS_WITH_SERVER_STATUS)
 		wsi->vhost->conn_stats.h2_trans++;
+#endif
 		p = lws_hdr_simple_ptr(h2n->swsi, WSI_TOKEN_HTTP_COLON_METHOD);
-		if (!strcmp(p, "POST"))
-			h2n->swsi->http.ah->frag_index[WSI_TOKEN_POST_URI] =
-				h2n->swsi->http.ah->frag_index[
+		/*
+		 * duplicate :path into the individual method uri header
+		 * index, so that it looks the same as h1 in the ah
+		 */
+		for (n = 0; n < (int)LWS_ARRAY_SIZE(method_names); n++)
+			if (!strcasecmp(p, method_names[n])) {
+				h2n->swsi->http.ah->frag_index[method_index[n]] =
+						h2n->swsi->http.ah->frag_index[
 				                     WSI_TOKEN_HTTP_COLON_PATH];
+				break;
+			}
 
 		lwsl_debug("%s: setting DEF_ACT from 0x%x\n", __func__,
 			   h2n->swsi->wsistate);
@@ -1503,7 +1562,7 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 		    h2n->swsi->h2.h2_state == LWS_H2_STATE_HALF_CLOSED_LOCAL)
 			lws_h2_state(h2n->swsi, LWS_H2_STATE_CLOSED);
 
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 		/*
 		 * client... remote END_STREAM implies we weren't going to
 		 * send anything else anyway.
@@ -1568,6 +1627,12 @@ lws_h2_parse_end_of_frame(struct lws *wsi)
 					      "alien sid");
 			break; /* ignore */
 		}
+
+		if (eff_wsi->vhost->options &
+		        LWS_SERVER_OPTION_H2_JUST_FIX_WINDOW_UPDATE_OVERFLOW &&
+		    (uint64_t)eff_wsi->h2.tx_cr + (uint64_t)h2n->hpack_e_dep >
+		    (uint64_t)0x7fffffff)
+			h2n->hpack_e_dep = 0x7fffffff - eff_wsi->h2.tx_cr;
 
 		if ((uint64_t)eff_wsi->h2.tx_cr + (uint64_t)h2n->hpack_e_dep >
 		    (uint64_t)0x7fffffff) {
@@ -1808,8 +1873,9 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 				 */
 				if (!wsi->immortal_substream_count)
 					lws_set_timeout(wsi,
-					  PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
-					  31);
+					PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
+						wsi->vhost->keepalive_timeout ?
+					    wsi->vhost->keepalive_timeout : 31);
 
 				if (!h2n->swsi)
 					break;
@@ -1849,9 +1915,12 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 					n = h2n->length - h2n->count + 1;
 					lwsl_debug("---- restricting len to %d vs %ld\n", n, (long)inlen + 1);
 				}
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 				if (h2n->swsi->client_h2_substream) {
-
+					if (!h2n->swsi->protocol) {
+						lwsl_err("%s: swsi %pdoesn't have protocol\n", __func__, h2n->swsi);
+						m = 1;
+					} else
 					m = user_callback_handle_rxflow(
 						h2n->swsi->protocol->callback,
 						h2n->swsi,
@@ -1876,7 +1945,7 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 				{
 
 					if (lwsi_state(h2n->swsi) == LRS_DEFERRING_ACTION) {
-						// lwsl_notice("appending because we are in LRS_DEFERRING_ACTION\n");
+						// lwsl_notice("%s: appending because we are in LRS_DEFERRING_ACTION\n", __func__);
 						m = lws_buflist_append_segment(
 							&h2n->swsi->buflist,
 								in - 1, n);
@@ -1885,7 +1954,7 @@ lws_h2_parser(struct lws *wsi, unsigned char *in, lws_filepos_t inlen,
 						if (m) {
 							struct lws_context_per_thread *pt = &wsi->context->pt[(int)wsi->tsi];
 							lwsl_debug("%s: added %p to rxflow list\n", __func__, wsi);
-							lws_dll_lws_add_front(&h2n->swsi->dll_buflist, &pt->dll_head_buflist);
+							lws_dll2_add_head(&h2n->swsi->dll_buflist, &pt->dll_buflist_owner);
 						}
 						in += n - 1;
 						h2n->inside += n;
@@ -2180,8 +2249,10 @@ lws_h2_client_handshake(struct lws *wsi)
 	if (lws_finalize_http_header(wsi, &p, end))
 		goto fail_length;
 
-	n = lws_write(wsi, start, p - start,
-		      LWS_WRITE_HTTP_HEADERS);
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	wsi->detlat.earliest_write_req_pre_write = lws_now_usecs();
+#endif
+	n = lws_write(wsi, start, p - start, LWS_WRITE_HTTP_HEADERS);
 	if (n != (p - start)) {
 		lwsl_err("_write returned %d from %ld\n", n,
 			 (long)(p - start));
@@ -2214,22 +2285,36 @@ lws_h2_ws_handshake(struct lws *wsi)
 	if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL) > 64)
 		return -1;
 
-	/* we can only return the protocol header if:
-	 *  - one came in, and ... */
-	if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL) &&
-	    /*  - it is not an empty string */
-	    wsi->protocol->name && wsi->protocol->name[0]) {
-		if (lws_add_http_header_by_token(wsi, WSI_TOKEN_PROTOCOL,
-					 (unsigned char *)wsi->protocol->name,
-					 (int)strlen(wsi->protocol->name),
-					 &p, end))
-		return -1;
+	if (wsi->proxied_ws_parent && wsi->child_list) {
+		if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_PROTOCOL)) {
+			if (lws_add_http_header_by_token(wsi, WSI_TOKEN_PROTOCOL,
+				(uint8_t *)lws_hdr_simple_ptr(wsi,
+							   WSI_TOKEN_PROTOCOL),
+				strlen(lws_hdr_simple_ptr(wsi,
+							   WSI_TOKEN_PROTOCOL)),
+						 &p, end))
+			return -1;
+		}
+	} else {
+
+		/* we can only return the protocol header if:
+		 *  - one came in, and ... */
+		if (lws_hdr_total_length(wsi, WSI_TOKEN_PROTOCOL) &&
+		    /*  - it is not an empty string */
+		    wsi->protocol->name && wsi->protocol->name[0]) {
+			if (lws_add_http_header_by_token(wsi, WSI_TOKEN_PROTOCOL,
+						 (unsigned char *)wsi->protocol->name,
+						 (int)strlen(wsi->protocol->name),
+						 &p, end))
+			return -1;
+		}
 	}
 
 	if (lws_finalize_http_header(wsi, &p, end))
 		return -1;
 
 	m = lws_ptr_diff(p, start);
+	// lwsl_hexdump_notice(start, m);
 	n = lws_write(wsi, start, m, LWS_WRITE_HTTP_HEADERS);
 	if (n != m) {
 		lwsl_err("_write returned %d from %d\n", n, m);
@@ -2333,3 +2418,21 @@ lws_read_h2(struct lws *wsi, unsigned char *buf, lws_filepos_t len)
 	return lws_ptr_diff(buf, oldbuf);
 }
 
+int
+lws_h2_client_stream_long_poll_rxonly(struct lws *wsi)
+{
+
+	if (!wsi->http2_substream)
+		return 1;
+
+	/*
+	 * Elect to send an empty DATA with END_STREAM, to force the stream
+	 * into HALF_CLOSED LOCAL
+	 */
+	wsi->h2.long_poll = 1;
+	wsi->h2.send_END_STREAM = 1;
+
+	lws_callback_on_writable(wsi);
+
+	return 0;
+}

@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 static void
 lws_event_hrtimer_cb(int fd, short event, void *p)
@@ -29,10 +32,10 @@ lws_event_hrtimer_cb(int fd, short event, void *p)
 	lws_usec_t us;
 
 	lws_pt_lock(pt, __func__);
-	us =  __lws_hrtimer_service(pt);
-	if (us != LWS_HRTIMER_NOWAIT) {
-		tv.tv_sec = us / 1000000;
-		tv.tv_usec = us - (tv.tv_sec * 1000000);
+	us = __lws_sul_check(&pt->pt_sul_owner, lws_now_usecs());
+	if (us) {
+		tv.tv_sec = us / LWS_US_PER_SEC;
+		tv.tv_usec = us - (tv.tv_sec * LWS_US_PER_SEC);
 		evtimer_add(pt->event.hrtimer, &tv);
 	}
 	lws_pt_unlock(pt);
@@ -50,9 +53,9 @@ lws_event_idle_timer_cb(int fd, short event, void *p)
 	/*
 	 * is there anybody with pending stuff that needs service forcing?
 	 */
-	if (!lws_service_adjust_timeout(pt->context, 1, pt->tid)) {
+	if (!lws_service_adjust_timeout(pt->context, 1, pt->tid))
 		/* -1 timeout means just do forced service */
-		_lws_plat_service_tsi(pt->context, -1, pt->tid);
+		_lws_plat_service_forced_tsi(pt->context, pt->tid);
 		/* still somebody left who wants forced service? */
 		if (!lws_service_adjust_timeout(pt->context, 1, pt->tid)) {
 			/* yes... come back again later */
@@ -65,13 +68,15 @@ lws_event_idle_timer_cb(int fd, short event, void *p)
 		}
 	}
 
+	lwsl_debug("%s: wait\n", __func__);
+
 	/* account for hrtimer */
 
 	lws_pt_lock(pt, __func__);
-	us =  __lws_hrtimer_service(pt);
-	if (us != LWS_HRTIMER_NOWAIT) {
-		tv.tv_sec = us / 1000000;
-		tv.tv_usec = us - (tv.tv_sec * 1000000);
+	us = __lws_sul_check(&pt->pt_sul_owner, lws_now_usecs());
+	if (us) {
+		tv.tv_sec = us / LWS_US_PER_SEC;
+		tv.tv_usec = us - (tv.tv_sec * LWS_US_PER_SEC);
 		evtimer_add(pt->event.hrtimer, &tv);
 	}
 	lws_pt_unlock(pt);
@@ -112,6 +117,9 @@ lws_event_cb(evutil_socket_t sock_fd, short revents, void *ctx)
 	}
 
 	wsi = wsi_from_fd(context, sock_fd);
+	if (!wsi) {
+		return;
+	}
 	pt = &context->pt[(int)wsi->tsi];
 
 	lws_service_fd_tsi(context, &eventfd, wsi->tsi);
@@ -184,8 +192,8 @@ elops_init_pt_event(struct lws_context *context, void *_loop, int tsi)
 	pt->event.hrtimer = event_new(loop, -1, EV_PERSIST,
 				      lws_event_hrtimer_cb, pt);
 
-	pt->event.idle_timer = event_new(loop, -1, EV_PERSIST,
-				      lws_event_idle_timer_cb, pt);
+	pt->event.idle_timer = event_new(loop, -1, 0,
+					 lws_event_idle_timer_cb, pt);
 
 	/* Register the signal watcher unless it's a foreign loop */
 
@@ -360,7 +368,7 @@ elops_destroy_context2_event(struct lws_context *context)
 	struct lws_context_per_thread *pt;
 	int n, m;
 
-	lwsl_debug("%s\n", __func__);
+	lwsl_debug("%s: in\n", __func__);
 
 	for (n = 0; n < context->count_threads; n++) {
 		int budget = 1000;
@@ -390,6 +398,8 @@ elops_destroy_context2_event(struct lws_context *context)
 		event_base_free(pt->event.io_loop);
 
 	}
+
+	lwsl_debug("%s: out\n", __func__);
 
 	return 0;
 }

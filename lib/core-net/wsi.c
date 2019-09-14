@@ -1,39 +1,44 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2019 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #if defined (_DEBUG)
 void lwsi_set_role(struct lws *wsi, lws_wsi_state_t role)
 {
 	wsi->wsistate = (wsi->wsistate & (~LWSI_ROLE_MASK)) | role;
 
-	lwsl_debug("lwsi_set_role(%p, 0x%x)\n", wsi, wsi->wsistate);
+	lwsl_debug("lwsi_set_role(%p, 0x%lx)\n", wsi,
+					(unsigned long)wsi->wsistate);
 }
 
 void lwsi_set_state(struct lws *wsi, lws_wsi_state_t lrs)
 {
 	wsi->wsistate = (wsi->wsistate & (~LRS_MASK)) | lrs;
 
-	lwsl_debug("lwsi_set_state(%p, 0x%x)\n", wsi, wsi->wsistate);
+	lwsl_debug("lwsi_set_state(%p, 0x%lx)\n", wsi,
+					(unsigned long)wsi->wsistate);
 }
 #endif
 
@@ -89,7 +94,7 @@ lws_get_network_wsi(struct lws *wsi)
 
 #if defined(LWS_WITH_HTTP2)
 	if (!wsi->http2_substream
-#if !defined(LWS_NO_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 			&& !wsi->client_h2_substream
 #endif
 	)
@@ -109,7 +114,7 @@ lws_vhost_name_to_protocol(struct lws_vhost *vh, const char *name)
 	int n;
 
 	for (n = 0; n < vh->count_protocols; n++)
-		if (!strcmp(name, vh->protocols[n].name))
+		if (vh->protocols[n].name && !strcmp(name, vh->protocols[n].name))
 			return &vh->protocols[n];
 
 	return NULL;
@@ -189,6 +194,9 @@ lws_callback_vhost_protocols_vhost(struct lws_vhost *vh, int reason, void *in,
 {
 	int n;
 	struct lws *wsi = lws_zalloc(sizeof(*wsi), "fake wsi");
+
+	if (!wsi)
+		return 1;
 
 	wsi->context = vh->context;
 	lws_vhost_bind_wsi(vh, wsi);
@@ -324,7 +332,7 @@ __lws_rx_flow_control(struct lws *wsi)
 	if (lws_buflist_next_segment_len(&wsi->buflist, NULL)) {
 		/* get ourselves called back to deal with stashed buffer */
 		lws_callback_on_writable(wsi);
-		return 0;
+		// return 0;
 	}
 
 	/* now the pending is cleared, we can change rxflow state */
@@ -337,6 +345,8 @@ __lws_rx_flow_control(struct lws *wsi)
 	/* adjust the pollfd for this wsi */
 
 	if (wsi->rxflow_change_to & LWS_RXFLOW_ALLOW) {
+		lwsl_info("%s: reenable POLLIN\n", __func__);
+		// lws_buflist_describe(&wsi->buflist, NULL, __func__);
 		if (__lws_change_pollfd(wsi, 0, LWS_POLLIN)) {
 			lwsl_info("%s: fail\n", __func__);
 			return -1;
@@ -438,8 +448,8 @@ lws_role_transition(struct lws *wsi, enum lwsi_role role, enum lwsi_state state,
 #if defined(_DEBUG)
 	if (wsi->role_ops)
 		name = wsi->role_ops->name;
-	lwsl_debug("%s: %p: wsistate 0x%x, ops %s\n", __func__, wsi,
-		   wsi->wsistate, name);
+	lwsl_debug("%s: %p: wsistate 0x%lx, ops %s\n", __func__, wsi,
+		   (unsigned long)wsi->wsistate, name);
 #endif
 }
 
@@ -588,23 +598,21 @@ lws_pvo_get_str(void *in, const char *name, const char **result)
 }
 
 int
-lws_broadcast(struct lws_context *context, int reason, void *in, size_t len)
+lws_broadcast(struct lws_context_per_thread *pt, int reason, void *in, size_t len)
 {
-	struct lws_vhost *v = context->vhost_list;
-	struct lws wsi;
+	struct lws_vhost *v = pt->context->vhost_list;
 	int n, ret = 0;
 
-	memset(&wsi, 0, sizeof(wsi));
-	wsi.context = context;
+	pt->fake_wsi->context = pt->context;
 
 	while (v) {
 		const struct lws_protocols *p = v->protocols;
-		wsi.vhost = v; /* not a real bound wsi */
+		pt->fake_wsi->vhost = v; /* not a real bound wsi */
 
 		for (n = 0; n < v->count_protocols; n++) {
-			wsi.protocol = p;
+			pt->fake_wsi->protocol = p;
 			if (p->callback &&
-			    p->callback(&wsi, reason, NULL, in, len))
+			    p->callback(pt->fake_wsi, reason, NULL, in, len))
 				ret |= 1;
 			p++;
 		}
@@ -743,47 +751,6 @@ lws_get_context(const struct lws *wsi)
 	return wsi->context;
 }
 
-#ifdef LWS_LATENCY
-void
-lws_latency(struct lws_context *context, struct lws *wsi, const char *action,
-	    int ret, int completed)
-{
-	unsigned long long u;
-	char buf[256];
-
-	u = lws_time_in_microseconds();
-
-	if (!action) {
-		wsi->latency_start = u;
-		if (!wsi->action_start)
-			wsi->action_start = u;
-		return;
-	}
-	if (completed) {
-		if (wsi->action_start == wsi->latency_start)
-			sprintf(buf,
-			  "Completion first try lat %lluus: %p: ret %d: %s\n",
-					u - wsi->latency_start,
-						      (void *)wsi, ret, action);
-		else
-			sprintf(buf,
-			  "Completion %lluus: lat %lluus: %p: ret %d: %s\n",
-				u - wsi->action_start,
-					u - wsi->latency_start,
-						      (void *)wsi, ret, action);
-		wsi->action_start = 0;
-	} else
-		sprintf(buf, "lat %lluus: %p: ret %d: %s\n",
-			      u - wsi->latency_start, (void *)wsi, ret, action);
-
-	if (u - wsi->latency_start > context->worst_latency) {
-		context->worst_latency = u - wsi->latency_start;
-		strcpy(context->worst_latency_info, buf);
-	}
-	lwsl_latency("%s", buf);
-}
-#endif
-
 LWS_VISIBLE int LWS_WARN_UNUSED_RESULT
 lws_raw_transaction_completed(struct lws *wsi)
 {
@@ -805,25 +772,6 @@ lws_raw_transaction_completed(struct lws *wsi)
 
 	return -1;
 }
-
-void
-lws_dll_dump(struct lws_dll_lws *head, const char *title)
-{
-	int n = 0;
-
-	(void)n;
-	lwsl_notice("%s: %s (head.next %p)\n", __func__, title, head->next);
-
-	lws_start_foreach_dll_safe(struct lws_dll_lws *, d, d1, head->next) {
-		struct lws *wsi = lws_container_of(d, struct lws, dll_hrtimer);
-
-		(void)wsi;
-
-		lwsl_notice("  %d: wsi %p: %llu\n", n++, wsi,
-				(unsigned long long)wsi->pending_timer);
-	} lws_end_foreach_dll_safe(d, d1);
-}
-
 
 int
 lws_bind_protocol(struct lws *wsi, const struct lws_protocols *p,
@@ -882,20 +830,69 @@ lws_bind_protocol(struct lws *wsi, const struct lws_protocols *p,
 	return 0;
 }
 
+void
+lws_http_close_immortal(struct lws *wsi)
+{
+	struct lws *nwsi;
+
+	if (!wsi->http2_substream)
+		return;
+
+	assert(wsi->h2_stream_immortal);
+	wsi->h2_stream_immortal = 0;
+
+	nwsi = lws_get_network_wsi(wsi);
+	lwsl_debug("%s: %p %p %d\n", __func__, wsi, nwsi,
+				     nwsi->immortal_substream_count);
+	assert(nwsi->immortal_substream_count);
+	nwsi->immortal_substream_count--;
+	if (!nwsi->immortal_substream_count)
+		/*
+		 * since we closed the only immortal stream on this nwsi, we
+		 * need to reapply a normal timeout regime to the nwsi
+		 */
+		lws_set_timeout(nwsi, PENDING_TIMEOUT_HTTP_KEEPALIVE_IDLE,
+				wsi->vhost->keepalive_timeout ?
+				    wsi->vhost->keepalive_timeout : 31);
+}
+
+void
+lws_http_mark_immortal(struct lws *wsi)
+{
+	struct lws *nwsi;
+
+	lws_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
+
+	if (!wsi->http2_substream
+#if defined(LWS_WITH_CLIENT)
+			&& !wsi->client_h2_substream
+#endif
+	) {
+		lwsl_err("%s: not h2 substream\n", __func__);
+		return;
+	}
+
+	nwsi = lws_get_network_wsi(wsi);
+
+	lwsl_debug("%s: %p %p %d\n", __func__, wsi, nwsi,
+				     nwsi->immortal_substream_count);
+
+	wsi->h2_stream_immortal = 1;
+	assert(nwsi->immortal_substream_count < 255); /* largest count */
+	nwsi->immortal_substream_count++;
+	if (nwsi->immortal_substream_count == 1)
+		lws_set_timeout(nwsi, NO_PENDING_TIMEOUT, 0);
+}
+
+
 int
 lws_http_mark_sse(struct lws *wsi)
 {
 	lws_http_headers_detach(wsi);
-	lws_set_timeout(wsi, NO_PENDING_TIMEOUT, 0);
+	lws_http_mark_immortal(wsi);
 
-	if (wsi->http2_substream) {
-		struct lws *nwsi = lws_get_network_wsi(wsi);
-
+	if (wsi->http2_substream)
 		wsi->h2_stream_carries_sse = 1;
-		nwsi->immortal_substream_count++;
-		if (nwsi->immortal_substream_count == 1)
-			lws_set_timeout(nwsi, NO_PENDING_TIMEOUT, 0);
-	}
 
 	return 0;
 }

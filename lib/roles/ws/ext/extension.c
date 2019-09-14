@@ -1,4 +1,28 @@
-#include "core/private.h"
+/*
+ * libwebsockets - small server side websockets and web server implementation
+ *
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+#include "private-lib-core.h"
 
 #include "extension-permessage-deflate.h"
 
@@ -225,7 +249,7 @@ lws_issue_raw_ext_access(struct lws *wsi, unsigned char *buf, size_t len)
 	struct lws_tokens ebuf;
 	int ret, m, n = 0;
 
-	ebuf.token = (char *)buf;
+	ebuf.token = buf;
 	ebuf.len = (int)len;
 
 	/*
@@ -248,7 +272,7 @@ lws_issue_raw_ext_access(struct lws *wsi, unsigned char *buf, size_t len)
 		if (m) /* handled */
 			ret = 1;
 
-		if ((char *)buf != ebuf.token)
+		if (buf != ebuf.token)
 			/*
 			 * extension recreated it:
 			 * need to buffer this if not all sent
@@ -258,8 +282,7 @@ lws_issue_raw_ext_access(struct lws *wsi, unsigned char *buf, size_t len)
 		/* assuming they left us something to send, send it */
 
 		if (ebuf.len) {
-			n = lws_issue_raw(wsi, (unsigned char *)ebuf.token,
-					  ebuf.len);
+			n = lws_issue_raw(wsi, ebuf.token, ebuf.len);
 			if (n < 0) {
 				lwsl_info("closing from ext access\n");
 				return -1;

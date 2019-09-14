@@ -1,39 +1,118 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2019 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #ifdef LWS_HAVE_SYS_TYPES_H
 #include <sys/types.h>
 #endif
 
-#ifdef LWS_WITH_IPV6
-#if defined(WIN32) || defined(_WIN32)
-#include <wincrypt.h>
-#include <iphlpapi.h>
-#else
-#include <net/if.h>
-#endif
-#endif
+void
+lws_ser_wu16be(uint8_t *b, uint16_t u)
+{
+	*b++ = (uint8_t)(u >> 8);
+	*b = (uint8_t)u;
+}
 
+void
+lws_ser_wu32be(uint8_t *b, uint32_t u32)
+{
+	*b++ = (uint8_t)(u32 >> 24);
+	*b++ = (uint8_t)(u32 >> 16);
+	*b++ = (uint8_t)(u32 >> 8);
+	*b = (uint8_t)u32;
+}
+
+void
+lws_ser_wu64be(uint8_t *b, uint64_t u64)
+{
+	lws_ser_wu32be(b, (uint32_t)(u64 >> 32));
+	lws_ser_wu32be(b + 4, (uint32_t)u64);
+}
+
+uint16_t
+lws_ser_ru16be(const uint8_t *b)
+{
+	return (b[0] << 8) | b[1];
+}
+
+uint32_t
+lws_ser_ru32be(const uint8_t *b)
+{
+	return (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+}
+
+uint64_t
+lws_ser_ru64be(const uint8_t *b)
+{
+	return (((uint64_t)lws_ser_ru32be(b)) << 32) | lws_ser_ru32be(b + 4);
+}
+
+int
+lws_vbi_encode(uint64_t value, void *buf)
+{
+	uint8_t *p = (uint8_t *)buf, b;
+
+	if (value > 0xfffffff) {
+		assert(0);
+		return -1;
+	}
+
+	do {
+		b = value & 0x7f;
+		value >>= 7;
+		if (value)
+			*p++ = (0x80 | b);
+		else
+			*p++ = b;
+	} while (value);
+
+	return p - (uint8_t *)buf;
+}
+
+int
+lws_vbi_decode(const void *buf, uint64_t *value, size_t len)
+{
+	const uint8_t *p = (const uint8_t *)buf, *end = p + len;
+	uint64_t v = 0;
+	int s = 0;
+
+	while (p < end) {
+		v |= (((uint64_t)(*p)) & 0x7f) << s;
+		if (*p & 0x80) {
+			*value = v;
+
+			return lws_ptr_diff(p, buf);
+		}
+		s += 7;
+		if (s >= 64)
+			return 0;
+		p++;
+	}
+
+	return 0;
+}
 
 signed char char_to_hex(const char c)
 {
@@ -48,8 +127,35 @@ signed char char_to_hex(const char c)
 
 	return -1;
 }
+
+int
+lws_hex_to_byte_array(const char *h, uint8_t *dest, int max)
+{
+	uint8_t *odest = dest;
+
+	while (max-- && *h) {
+		int t = char_to_hex(*h++), t1;
+
+		if (!*h || t < 0)
+			return -1;
+
+		t1 = char_to_hex(*h++);
+		if (t1 < 0)
+			return -1;
+
+		*dest++ = (t << 4) | t1;
+	}
+
+	if (max < 0)
+		return -1;
+
+	return dest - odest;
+}
+
+
 #if !defined(LWS_PLAT_OPTEE)
 
+#if defined(LWS_WITH_FILE_OPS)
 int lws_open(const char *__file, int __oflag, ...)
 {
 	va_list ap;
@@ -76,88 +182,6 @@ int lws_open(const char *__file, int __oflag, ...)
 	return n;
 }
 #endif
-
-
-void
-lws_dll_add_front(struct lws_dll *d, struct lws_dll *phead)
-{
-	if (d->prev)
-		return;
-
-	/* our next guy is current first guy */
-	d->next = phead->next;
-	/* if there is a next guy, set his prev ptr to our next ptr */
-	if (d->next)
-		d->next->prev = d;
-	/* our prev ptr is first ptr */
-	d->prev = phead;
-	/* set the first guy to be us */
-	phead->next = d;
-}
-
-/* situation is:
- *
- *  HEAD: struct lws_dll * = &entry1
- *
- *  Entry 1: struct lws_dll  .pprev = &HEAD , .next = Entry 2
- *  Entry 2: struct lws_dll  .pprev = &entry1 , .next = &entry2
- *  Entry 3: struct lws_dll  .pprev = &entry2 , .next = NULL
- *
- *  Delete Entry1:
- *
- *   - HEAD = &entry2
- *   - Entry2: .pprev = &HEAD, .next = &entry3
- *   - Entry3: .pprev = &entry2, .next = NULL
- *
- *  Delete Entry2:
- *
- *   - HEAD = &entry1
- *   - Entry1: .pprev = &HEAD, .next = &entry3
- *   - Entry3: .pprev = &entry1, .next = NULL
- *
- *  Delete Entry3:
- *
- *   - HEAD = &entry1
- *   - Entry1: .pprev = &HEAD, .next = &entry2
- *   - Entry2: .pprev = &entry1, .next = NULL
- *
- */
-
-void
-lws_dll_remove(struct lws_dll *d)
-{
-	if (!d->prev) /* ie, not part of the list */
-		return;
-
-	/*
-	 *  remove us
-	 *
-	 *  USp <-> us <-> USn  -->  USp <-> USn
-	 */
-
-	/* if we have a next guy, set his prev to our prev */
-	if (d->next)
-		d->next->prev = d->prev;
-
-	/* set our prev guy to our next guy instead of us */
-	if (d->prev)
-		d->prev->next = d->next;
-
-	/* we're out of the list, we should not point anywhere any more */
-	d->prev = NULL;
-	d->next = NULL;
-}
-
-#if !(defined(LWS_PLAT_OPTEE) && !defined(LWS_WITH_NETWORK))
-
-LWS_VISIBLE lws_usec_t
-lws_now_usecs(void)
-{
-	struct timeval now;
-
-	gettimeofday(&now, NULL);
-	return (now.tv_sec * 1000000ll) + now.tv_usec;
-}
 #endif
 
 int
@@ -178,151 +202,6 @@ lws_pthread_self_to_tsi(struct lws_context *context)
 #else
 	return 0;
 #endif
-}
-
-
-/* lws_buflist */
-
-int
-lws_buflist_append_segment(struct lws_buflist **head, const uint8_t *buf,
-			   size_t len)
-{
-	struct lws_buflist *nbuf;
-	int first = !*head;
-	void *p = *head;
-	int sanity = 1024;
-
-	assert(buf);
-	assert(len);
-
-	/* append at the tail */
-	while (*head) {
-		if (!--sanity) {
-			lwsl_err("%s: buflist reached sanity limit\n", __func__);
-			return -1;
-		}
-		if (*head == (*head)->next) {
-			lwsl_err("%s: corrupt list points to self\n", __func__);
-			return -1;
-		}
-		head = &((*head)->next);
-	}
-
-	lwsl_info("%s: len %u first %d %p\n", __func__, (uint32_t)len, first, p);
-
-	nbuf = (struct lws_buflist *)lws_malloc(sizeof(**head) + len, __func__);
-	if (!nbuf) {
-		lwsl_err("%s: OOM\n", __func__);
-		return -1;
-	}
-
-	nbuf->len = len;
-	nbuf->pos = 0;
-	nbuf->next = NULL;
-
-	p = (void *)nbuf->buf;
-	memcpy(p, buf, len);
-
-	*head = nbuf;
-
-	return first; /* returns 1 if first segment just created */
-}
-
-static int
-lws_buflist_destroy_segment(struct lws_buflist **head)
-{
-	struct lws_buflist *old = *head;
-
-	assert(*head);
-	*head = old->next;
-	old->next = NULL;
-	lws_free(old);
-
-	return !*head; /* returns 1 if last segment just destroyed */
-}
-
-void
-lws_buflist_destroy_all_segments(struct lws_buflist **head)
-{
-	struct lws_buflist *p = *head, *p1;
-
-	while (p) {
-		p1 = p->next;
-		p->next = NULL;
-		lws_free(p);
-		p = p1;
-	}
-
-	*head = NULL;
-}
-
-size_t
-lws_buflist_next_segment_len(struct lws_buflist **head, uint8_t **buf)
-{
-	if (!*head) {
-		if (buf)
-			*buf = NULL;
-
-		return 0;
-	}
-
-	if (!(*head)->len && (*head)->next)
-		lws_buflist_destroy_segment(head);
-
-	if (!*head) {
-		if (buf)
-			*buf = NULL;
-
-		return 0;
-	}
-
-	assert((*head)->pos < (*head)->len);
-
-	if (buf)
-		*buf = (*head)->buf + (*head)->pos;
-
-	return (*head)->len - (*head)->pos;
-}
-
-int
-lws_buflist_use_segment(struct lws_buflist **head, size_t len)
-{
-	assert(*head);
-	assert(len);
-	assert((*head)->pos + len <= (*head)->len);
-
-	(*head)->pos += len;
-	if ((*head)->pos == (*head)->len)
-		lws_buflist_destroy_segment(head);
-
-	if (!*head)
-		return 0;
-
-	return (int)((*head)->len - (*head)->pos);
-}
-
-void
-lws_buflist_describe(struct lws_buflist **head, void *id)
-{
-	struct lws_buflist *old;
-	int n = 0;
-
-	if (*head == NULL)
-		lwsl_notice("%p: buflist empty\n", id);
-
-	while (*head) {
-		lwsl_notice("%p: %d: %llu / %llu (%llu left)\n", id, n,
-			    (unsigned long long)(*head)->pos,
-			    (unsigned long long)(*head)->len,
-			    (unsigned long long)(*head)->len - (*head)->pos);
-		old = *head;
-		head = &((*head)->next);
-		if (*head == old) {
-			lwsl_err("%s: next points to self\n", __func__);
-			break;
-		}
-		n++;
-	}
 }
 
 LWS_EXTERN void *
@@ -356,23 +235,15 @@ lws_now_secs(void)
 	return tv.tv_sec;
 }
 
-LWS_VISIBLE LWS_EXTERN int
-lws_compare_time_t(struct lws_context *context, time_t t1, time_t t2)
-{
-	if (t1 < context->time_discontiguity)
-		t1 += context->time_fixup;
-
-	if (t2 < context->time_discontiguity)
-		t2 += context->time_fixup;
-
-	return (int)(t1 - t2);
-}
 #endif
+
+#if defined(LWS_WITH_SERVER)
 LWS_VISIBLE extern const char *
 lws_canonical_hostname(struct lws_context *context)
 {
 	return (const char *)context->canonical_hostname;
 }
+#endif
 
 #if defined(LWS_WITH_SOCKS5)
 LWS_VISIBLE int
@@ -719,18 +590,9 @@ lws_urldecode(char *string, const char *escaped, int len)
 LWS_VISIBLE LWS_EXTERN int
 lws_finalize_startup(struct lws_context *context)
 {
-	struct lws_context_creation_info info;
-
-	info.uid = context->uid;
-	info.gid = context->gid;
-
-#if defined(LWS_HAVE_SYS_CAPABILITY_H) && defined(LWS_HAVE_LIBCAP)
-	memcpy(info.caps, context->caps, sizeof(info.caps));
-	info.count_caps = context->count_caps;
-#endif
-
 	if (lws_check_opt(context->options, LWS_SERVER_OPTION_EXPLICIT_VHOSTS))
-		lws_plat_drop_app_privileges(&info);
+		if (lws_plat_drop_app_privileges(context, 1))
+			return 1;
 
 	return 0;
 }
@@ -790,14 +652,18 @@ typedef enum {
 	LWS_TOKZS_TOKEN_POST_TERMINAL
 } lws_tokenize_state;
 
+#if defined(LWS_AMAZON_RTOS)
+lws_tokenize_elem
+#else
 int
+#endif
 lws_tokenize(struct lws_tokenize *ts)
 {
 	const char *rfc7230_delims = "(),/:;<=>?@[\\]{}";
 	lws_tokenize_state state = LWS_TOKZS_LEADING_WHITESPACE;
 	char c, flo = 0, d_minus = '-', d_dot = '.', s_minus = '\0',
 	     s_dot = '\0';
-	signed char num = -1;
+	signed char num = ts->flags & LWS_TOKENIZE_F_NO_INTEGERS ? 0 : -1;
 	int utf8 = 0;
 
 	/* for speed, compute the effect of the flags outside the loop */
@@ -959,21 +825,21 @@ lws_tokenize(struct lws_tokenize *ts)
 			state = LWS_TOKZS_TOKEN;
 			ts->token = ts->start - 1;
 			ts->token_len = 1;
-			if (c < '0' || c > '9')
-				num = 0;
-			else
-				if (num < 0)
-					num = 1;
-			continue;
+			goto checknum;
+
 		case LWS_TOKZS_QUOTED_STRING:
 		case LWS_TOKZS_TOKEN:
-			if (c < '0' || c > '9')
-				num = 0;
-			else
-				if (num < 0)
-					num = 1;
 			ts->token_len++;
+checknum:
+			if (!(ts->flags & LWS_TOKENIZE_F_NO_INTEGERS)) {
+				if (c < '0' || c > '9')
+					num = 0;
+				else
+					if (num < 0)
+						num = 1;
+			}
 			continue;
+
 		case LWS_TOKZS_TOKEN_POST_TERMINAL:
 			/* report the new token next time */
 			ts->start--;
@@ -1116,3 +982,66 @@ lws_cmdline_option(int argc, const char **argv, const char *val)
 	return NULL;
 }
 
+
+const lws_humanize_unit_t humanize_schema_si[] = {
+	{ "Pi ", LWS_PI }, { "Ti ", LWS_TI }, { "Gi ", LWS_GI },
+	{ "Mi ", LWS_MI }, { "Ki ", LWS_KI }, { "   ", 1 },
+	{ NULL, 0 }
+};
+const lws_humanize_unit_t humanize_schema_si_bytes[] = {
+	{ "PiB", LWS_PI }, { "TiB", LWS_TI }, { "GiB", LWS_GI },
+	{ "MiB", LWS_MI }, { "KiB", LWS_KI }, { "B  ", 1 },
+	{ NULL, 0 }
+};
+const lws_humanize_unit_t humanize_schema_us[] = {
+	{ "y  ",  (uint64_t)365 * 24 * 3600 * LWS_US_PER_SEC },
+	{ "d  ",  (uint64_t)24 * 3600 * LWS_US_PER_SEC },
+	{ "hr ", (uint64_t)3600 * LWS_US_PER_SEC },
+	{ "min", 60 * LWS_US_PER_SEC },
+	{ "s  ", LWS_US_PER_SEC },
+	{ "ms ", LWS_US_PER_MS },
+	{ "us ", 1 },
+	{ NULL, 0 }
+};
+
+int
+lws_humanize(char *p, int len, uint64_t v, const lws_humanize_unit_t *schema)
+{
+	do {
+		if (v >= schema->factor || schema->factor == 1) {
+			if (schema->factor == 1)
+				return lws_snprintf(p, len,
+					" %4"PRIu64"%s    ",
+					v / schema->factor, schema->name);
+
+			return lws_snprintf(p, len, " %4"PRIu64".%03"PRIu64"%s",
+				v / schema->factor,
+				(v % schema->factor) / (schema->factor / 1000),
+				schema->name);
+		}
+		schema++;
+	} while (schema->name);
+
+	assert(0);
+
+	return 0;
+}
+
+int
+lws_system_get_info(struct lws_context *context, lws_system_item_t item,
+		    lws_system_arg_t arg, size_t *len)
+{
+	if (!context->system_ops || !context->system_ops->get_info)
+		return 1;
+
+	return context->system_ops->get_info(item, arg, len);
+}
+
+int
+lws_system_reboot(struct lws_context *context)
+{
+	if (!context->system_ops || !context->system_ops->reboot)
+		return 1;
+
+	return context->system_ops->reboot();
+}

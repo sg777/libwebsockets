@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2019 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 const struct lws_role_ops *available_roles[] = {
 #if defined(LWS_ROLE_H2)
@@ -55,6 +58,15 @@ const struct lws_event_loop_ops *available_event_libs[] = {
 #endif
 	NULL
 };
+
+#if defined(LWS_WITH_ABSTRACT)
+const struct lws_protocols *available_abstract_protocols[] = {
+#if defined(LWS_ROLE_RAW)
+	&protocol_abs_client_raw_skt,
+#endif
+	NULL
+};
+#endif
 
 static const char * const mount_protocols[] = {
 	"http://",
@@ -100,7 +112,6 @@ lws_role_call_alpn_negotiated(struct lws *wsi, const char *alpn)
 	return 0;
 }
 
-//#if !defined(LWS_WITHOUT_SERVER)
 int
 lws_role_call_adoption_bind(struct lws *wsi, int type, const char *prot)
 {
@@ -167,9 +178,8 @@ lws_role_call_adoption_bind(struct lws *wsi, int type, const char *prot)
 
 	return 1;
 }
-//#endif
 
-#if !defined(LWS_WITHOUT_CLIENT)
+#if defined(LWS_WITH_CLIENT)
 int
 lws_role_call_client_bind(struct lws *wsi,
 			  const struct lws_client_connect_info *i)
@@ -279,7 +289,7 @@ lws_protocol_init(struct lws_context *context)
 {
 	struct lws_vhost *vh = context->vhost_list;
 	const struct lws_protocol_vhost_options *pvo, *pvo1;
-	struct lws wsi;
+	struct lws *wsi = context->pt[0].fake_wsi;
 	int n, any = 0;
 
 	if (context->doing_protocol_init)
@@ -287,23 +297,22 @@ lws_protocol_init(struct lws_context *context)
 
 	context->doing_protocol_init = 1;
 
-	memset(&wsi, 0, sizeof(wsi));
-	wsi.context = context;
+	wsi->context = context;
 
 	lwsl_info("%s\n", __func__);
 
 	while (vh) {
-		wsi.vhost = vh;
+		wsi->vhost = vh;
 
 		/* only do the protocol init once for a given vhost */
 		if (vh->created_vhost_protocols ||
-		    (vh->options & LWS_SERVER_OPTION_SKIP_PROTOCOL_INIT))
+		    (lws_check_opt(vh->options, LWS_SERVER_OPTION_SKIP_PROTOCOL_INIT)))
 			goto next;
 
 		/* initialize supported protocols on this vhost */
 
 		for (n = 0; n < vh->count_protocols; n++) {
-			wsi.protocol = &vh->protocols[n];
+			wsi->protocol = &vh->protocols[n];
 			if (!vh->protocols[n].name)
 				continue;
 			pvo = lws_vhost_protocol_options(vh,
@@ -356,11 +365,13 @@ lws_protocol_init(struct lws_context *context)
 			 * NOTE the wsi is all zeros except for the context, vh
 			 * + protocol ptrs so lws_get_context(wsi) etc can work
 			 */
-			if (vh->protocols[n].callback(&wsi,
+			if (vh->protocols[n].callback(wsi,
 					LWS_CALLBACK_PROTOCOL_INIT, NULL,
 					(void *)pvo, 0)) {
-				lws_free(vh->protocol_vh_privs[n]);
-				vh->protocol_vh_privs[n] = NULL;
+				if (vh->protocol_vh_privs[n]) {
+					lws_free(vh->protocol_vh_privs[n]);
+					vh->protocol_vh_privs[n] = NULL;
+				}
 				lwsl_err("%s: protocol %s failed init\n",
 					 __func__, vh->protocols[n].name);
 
@@ -375,13 +386,15 @@ next:
 
 	context->doing_protocol_init = 0;
 
-	if (!context->protocol_init_done)
-		lws_finalize_startup(context);
+	if (!context->protocol_init_done && lws_finalize_startup(context))
+		return 1;
 
 	context->protocol_init_done = 1;
 
+#if defined(LWS_WITH_SERVER)
 	if (any)
 		lws_tls_check_all_cert_lifetimes(context);
+#endif
 
 	return 0;
 }
@@ -420,15 +433,18 @@ lws_create_vhost(struct lws_context *context,
 			 **vh1 = &context->vhost_list;
 	const struct lws_http_mount *mounts;
 	const struct lws_protocols *pcols = info->protocols;
-	const struct lws_protocol_vhost_options *pvo;
 #ifdef LWS_WITH_PLUGINS
 	struct lws_plugin *plugin = context->plugin_list;
 #endif
 	struct lws_protocols *lwsp;
-	int m, f = !info->pvo;
-	char buf[20];
-#if !defined(LWS_WITHOUT_CLIENT) && defined(LWS_HAVE_GETENV)
+	int m, f = !info->pvo, fx = 0, abs_pcol_count = 0;
+	char buf[96];
+#if defined(LWS_CLIENT_HTTP_PROXYING) && \
+    defined(LWS_WITH_CLIENT) && defined(LWS_HAVE_GETENV)
 	char *p;
+#endif
+#if defined(LWS_WITH_ASYNC_DNS)
+	extern struct lws_protocols lws_async_dns_protocol;
 #endif
 	int n;
 
@@ -439,7 +455,7 @@ lws_create_vhost(struct lws_context *context,
 	pthread_mutex_init(&vh->lock, NULL);
 #endif
 
-	if (!pcols)
+	if (!pcols && !info->pprotocols)
 		pcols = &protocols_dummy[0];
 
 	vh->context = context;
@@ -452,19 +468,29 @@ lws_create_vhost(struct lws_context *context,
 	vh->http.error_document_404 = info->error_document_404;
 #endif
 
-	if (info->options & LWS_SERVER_OPTION_ONLY_RAW)
+	if (lws_check_opt(info->options, LWS_SERVER_OPTION_ONLY_RAW))
 		lwsl_info("%s set to only support RAW\n", vh->name);
 
 	vh->iface = info->iface;
-#if !defined(LWS_WITH_ESP32) && \
-    !defined(OPTEE_TA) && !defined(WIN32)
+#if !defined(LWS_PLAT_FREERTOS) && !defined(OPTEE_TA) && !defined(WIN32)
 	vh->bind_iface = info->bind_iface;
 #endif
 
-	for (vh->count_protocols = 0;
-	     pcols[vh->count_protocols].callback;
-	     vh->count_protocols++)
-		;
+	/*
+	 * let's figure out how many protocols the user is handing us, using the
+	 * old or new way depending on what he gave us
+	 */
+
+	if (!pcols)
+		for (vh->count_protocols = 0;
+			info->pprotocols[vh->count_protocols];
+			vh->count_protocols++)
+			;
+	else
+		for (vh->count_protocols = 0;
+			pcols[vh->count_protocols].callback;
+			vh->count_protocols++)
+				;
 
 	vh->options = info->options;
 	vh->pvo = info->pvo;
@@ -474,6 +500,7 @@ lws_create_vhost(struct lws_context *context,
 	vh->finalize_arg = info->finalize_arg;
 	vh->listen_accept_role = info->listen_accept_role;
 	vh->listen_accept_protocol = info->listen_accept_protocol;
+	vh->unix_socket_perms = info->unix_socket_perms;
 
 	LWS_FOR_EVERY_AVAILABLE_ROLE_START(ar)
 		if (ar->init_vhost)
@@ -523,22 +550,66 @@ lws_create_vhost(struct lws_context *context,
 	}
 #endif
 
+#if defined(LWS_WITH_HTTP_PROXY) && defined(LWS_ROLE_WS)
+	fx = 1;
+#endif
+#if defined(LWS_WITH_ABSTRACT)
+	abs_pcol_count = (int)LWS_ARRAY_SIZE(available_abstract_protocols) - 1;
+#endif
+
 	/*
-	 * give the vhost a unified list of protocols including the
-	 * ones that came from plugins
+	 * give the vhost a unified list of protocols including:
+	 *
+	 * - internal, async_dns if enabled (first vhost only)
+	 * - internal, abstracted ones
+	 * - the ones that came from plugins
+	 * - his user protocols
 	 */
-	lwsp = lws_zalloc(sizeof(struct lws_protocols) * (vh->count_protocols +
-				   context->plugin_protocol_count + 1),
+	lwsp = lws_zalloc(sizeof(struct lws_protocols) *
+				(vh->count_protocols +
+				   abs_pcol_count +
+				   context->plugin_protocol_count +
+				   fx + 1),
 			  "vhost-specific plugin table");
 	if (!lwsp) {
 		lwsl_err("OOM\n");
 		return NULL;
 	}
 
-	m = vh->count_protocols;
-	memcpy(lwsp, pcols, sizeof(struct lws_protocols) * m);
+	/*
+	 * 1: user protocols (from pprotocols or protocols)
+	 */
 
-	/* for compatibility, all protocols enabled on vhost if only
+	m = vh->count_protocols;
+	if (!pcols) {
+		for (n = 0; n < m; n++)
+			memcpy(&lwsp[n], info->pprotocols[n], sizeof(lwsp[0]));
+	} else
+		memcpy(lwsp, pcols, sizeof(struct lws_protocols) * m);
+
+	/*
+	 * 2: abstract protocols
+	 */
+#if defined(LWS_WITH_ABSTRACT)
+	for (n = 0; n < abs_pcol_count; n++) {
+		memcpy(&lwsp[m++], available_abstract_protocols[n],
+		       sizeof(*lwsp));
+		vh->count_protocols++;
+	}
+#endif
+	/*
+	 * 3: async dns protocol (first vhost only)
+	 */
+#if defined(LWS_WITH_ASYNC_DNS)
+	if (!context->vhost_list) {
+		memcpy(&lwsp[m++], &lws_async_dns_protocol,
+		       sizeof(struct lws_protocols));
+		vh->count_protocols++;
+	}
+#endif
+
+	/*
+	 * 3: For compatibility, all protocols enabled on vhost if only
 	 * the default vhost exists.  Otherwise only vhosts who ask
 	 * for a protocol get it enabled.
 	 */
@@ -548,7 +619,6 @@ lws_create_vhost(struct lws_context *context,
 	(void)f;
 #ifdef LWS_WITH_PLUGINS
 	if (plugin) {
-
 		while (plugin) {
 			for (n = 0; n < plugin->caps.count_protocols; n++) {
 				/*
@@ -569,19 +639,16 @@ lws_create_vhost(struct lws_context *context,
 	}
 #endif
 
-	if (
-#ifdef LWS_WITH_PLUGINS
-	    (context->plugin_list) ||
+#if defined(LWS_WITH_HTTP_PROXY) && defined(LWS_ROLE_WS)
+	memcpy(&lwsp[m++], &lws_ws_proxy, sizeof(*lwsp));
+	vh->count_protocols++;
 #endif
-	    context->options & LWS_SERVER_OPTION_EXPLICIT_VHOSTS)
-		vh->protocols = lwsp;
-	else {
-		vh->protocols = pcols;
-		lws_free(lwsp);
-	}
 
-	vh->same_vh_protocol_heads = (struct lws_dll_lws *)
-			lws_zalloc(sizeof(struct lws_dll_lws) *
+	vh->protocols = lwsp;
+	vh->allocated_vhost_protocols = 1;
+
+	vh->same_vh_protocol_owner = (struct lws_dll2_owner *)
+			lws_zalloc(sizeof(struct lws_dll2_owner) *
 				   vh->count_protocols, "same vh list");
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 	vh->http.mount_list = info->mounts;
@@ -616,38 +683,21 @@ lws_create_vhost(struct lws_context *context,
 			  mount_protocols[mounts->origin_protocol],
 			  mounts->origin, mounts->mountpoint);
 
-		/* convert interpreter protocol names to pointers */
-		pvo = mounts->interpret;
-		while (pvo) {
-			for (n = 0; n < vh->count_protocols; n++) {
-				if (strcmp(pvo->value, vh->protocols[n].name))
-					continue;
-				((struct lws_protocol_vhost_options *)pvo)->
-					value = (const char *)(lws_intptr_t)n;
-				break;
-			}
-			if (n == vh->count_protocols)
-				lwsl_err("ignoring unknown interp pr %s\n",
-					 pvo->value);
-			pvo = pvo->next;
-		}
-
 		mounts = mounts->mount_next;
 	}
 
 	vh->listen_port = info->port;
-#if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
-	vh->http.http_proxy_port = 0;
-	vh->http.http_proxy_address[0] = '\0';
-#endif
+
 #if defined(LWS_WITH_SOCKS5)
 	vh->socks_proxy_port = 0;
 	vh->socks_proxy_address[0] = '\0';
 #endif
 
-#if !defined(LWS_WITHOUT_CLIENT)
+#if defined(LWS_WITH_CLIENT) && defined(LWS_CLIENT_HTTP_PROXYING)
 	/* either use proxy from info, or try get it from env var */
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
+	vh->http.http_proxy_port = 0;
+	vh->http.http_proxy_address[0] = '\0';
 	/* http proxy */
 	if (info->http_proxy_address) {
 		/* override for backwards compatibility */
@@ -659,8 +709,11 @@ lws_create_vhost(struct lws_context *context,
 	{
 #ifdef LWS_HAVE_GETENV
 		p = getenv("http_proxy");
-		if (p)
-			lws_set_proxy(vh, p);
+		if (p) {
+			lws_strncpy(buf, p, sizeof(buf));
+
+			lws_set_proxy(vh, buf);
+		}
 #endif
 	}
 #endif
@@ -674,7 +727,7 @@ lws_create_vhost(struct lws_context *context,
 	} else {
 #ifdef LWS_HAVE_GETENV
 		p = getenv("socks_proxy");
-		if (p)
+		if (p && strlen(p) > 0 && strlen(p) < 95)
 			lws_set_socks(vh, p);
 #endif
 	}
@@ -714,6 +767,7 @@ lws_create_vhost(struct lws_context *context,
 		lwsl_err("%s: lws_context_init_client_ssl failed\n", __func__);
 		goto bail1;
 	}
+#if defined(LWS_WITH_SERVER)
 	lws_context_lock(context, "create_vhost");
 	n = _lws_vhost_init_server(info, vh);
 	lws_context_unlock(context);
@@ -721,6 +775,8 @@ lws_create_vhost(struct lws_context *context,
 		lwsl_err("init server failed\n");
 		goto bail1;
 	}
+#endif
+	n = !!context->vhost_list;
 
 	while (1) {
 		if (!(*vh1)) {
@@ -729,6 +785,11 @@ lws_create_vhost(struct lws_context *context,
 		}
 		vh1 = &(*vh1)->vhost_next;
 	};
+
+#if defined(LWS_WITH_ASYNC_DNS)
+	if (!n && lws_async_dns_init(context))
+		goto bail1;
+#endif
 
 	/* for the case we are adding a vhost much later, after server init */
 
@@ -833,9 +894,11 @@ lws_create_event_pipes(struct lws_context *context)
 		wsi->desc.sockfd = context->pt[n].dummy_pipe_fds[0];
 		lwsl_debug("event pipe fd %d\n", wsi->desc.sockfd);
 
+#if !defined(LWS_AMAZON_RTOS)
 		if (context->event_loop_ops->accept)
 			if (context->event_loop_ops->accept(wsi))
 				return 1;
+#endif
 
 		if (__insert_wsi_socket_into_fds(context, wsi))
 			return 1;
@@ -853,7 +916,6 @@ lws_destroy_event_pipe(struct lws *wsi)
 	if (wsi->context->event_loop_ops->wsi_logical_close) {
 		wsi->context->event_loop_ops->wsi_logical_close(wsi);
 		lws_plat_pipe_close(wsi);
-		wsi->context->count_wsi_allocated--;
 		return;
 	}
 
@@ -940,6 +1002,18 @@ out:
 	lws_context_unlock(context); /* --------------------------- context { */
 }
 
+#if defined(LWS_WITH_ABSTRACT)
+static int
+destroy_ais(struct lws_dll2 *d, void *user)
+{
+	lws_abs_t *ai = lws_container_of(d, lws_abs_t, abstract_instances);
+
+	lws_abs_destroy_instance(&ai);
+
+	return 0;
+}
+#endif
+
 void
 __lws_vhost_destroy2(struct lws_vhost *vh)
 {
@@ -968,7 +1042,9 @@ __lws_vhost_destroy2(struct lws_vhost *vh)
 		n = 0;
 		while (n < vh->count_protocols) {
 			wsi.protocol = protocol;
-			protocol->callback(&wsi, LWS_CALLBACK_PROTOCOL_DESTROY,
+
+			if (protocol->callback)
+				protocol->callback(&wsi, LWS_CALLBACK_PROTOCOL_DESTROY,
 					   NULL, NULL, 0);
 			protocol++;
 			n++;
@@ -1035,10 +1111,14 @@ __lws_vhost_destroy2(struct lws_vhost *vh)
 	if (vh->protocol_vh_privs)
 		lws_free(vh->protocol_vh_privs);
 	lws_ssl_SSL_CTX_destroy(vh);
-	lws_free(vh->same_vh_protocol_heads);
+	lws_free(vh->same_vh_protocol_owner);
 
-	if (context->plugin_list ||
-	    (context->options & LWS_SERVER_OPTION_EXPLICIT_VHOSTS))
+	if (
+#if defined(LWS_WITH_PLUGINS)
+		context->plugin_list ||
+#endif
+	    (context->options & LWS_SERVER_OPTION_EXPLICIT_VHOSTS) ||
+	    vh->allocated_vhost_protocols)
 		lws_free((void *)vh->protocols);
 #if defined(LWS_WITH_NETWORK)
 	LWS_FOR_EVERY_AVAILABLE_ROLE_START(ar)
@@ -1076,6 +1156,14 @@ __lws_vhost_destroy2(struct lws_vhost *vh)
 
 	if (vh->finalize)
 		vh->finalize(vh, vh->finalize_arg);
+
+#if defined(LWS_WITH_ABSTRACT)
+	/*
+	 * abstract instances
+	 */
+
+	lws_dll2_foreach_safe(&vh->abstract_instances_owner, NULL, destroy_ais);
+#endif
 
 	lwsl_info("  %s: Freeing vhost %p\n", __func__, vh);
 
@@ -1198,7 +1286,7 @@ lws_get_vhost_listen_port(struct lws_vhost *vhost)
 	return vhost->listen_port;
 }
 
-
+#if defined(LWS_WITH_SERVER)
 LWS_VISIBLE LWS_EXTERN void
 lws_context_deprecate(struct lws_context *context, lws_reload_func cb)
 {
@@ -1239,3 +1327,19 @@ lws_context_deprecate(struct lws_context *context, lws_reload_func cb)
 	context->deprecated = 1;
 	context->deprecation_cb = cb;
 }
+#endif
+
+#if defined(LWS_WITH_NETWORK)
+struct lws_vhost *
+lws_get_vhost_by_name(struct lws_context *context, const char *name)
+{
+	lws_start_foreach_ll(struct lws_vhost *, v,
+			     context->vhost_list) {
+		if (!strcmp(v->name, name))
+			return v;
+
+	} lws_end_foreach_ll(v, vhost_next);
+
+	return NULL;
+}
+#endif

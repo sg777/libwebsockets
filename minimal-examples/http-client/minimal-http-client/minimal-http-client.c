@@ -1,7 +1,7 @@
 /*
  * lws-minimal-http-client
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -17,6 +17,9 @@
 #include <signal.h>
 
 static int interrupted, bad = 1, status;
+#if defined(LWS_WITH_HTTP2)
+static int long_poll;
+#endif
 static struct lws *client_wsi;
 
 static int
@@ -35,11 +38,22 @@ callback_http(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP:
 		status = lws_http_client_http_response(wsi);
 		lwsl_user("Connected with server response: %d\n", status);
+#if defined(LWS_WITH_HTTP2)
+		if (long_poll) {
+			lwsl_user("%s: Client entering long poll mode\n", __func__);
+			lws_h2_client_stream_long_poll_rxonly(wsi);
+		}
+#endif
 		break;
 
 	/* chunks of chunked content, with header removed */
 	case LWS_CALLBACK_RECEIVE_CLIENT_HTTP_READ:
 		lwsl_user("RECEIVE_CLIENT_HTTP_READ: read %d\n", (int)len);
+#if defined(LWS_WITH_HTTP2)
+		if (long_poll)
+			lwsl_notice("long poll rx: '%.*s'\n",
+					(int)len, (const char *)in);
+#endif
 #if 0  /* enable to dump the html */
 		{
 			const char *p = in;
@@ -130,6 +144,15 @@ int main(int argc, const char **argv)
 	info.port = CONTEXT_PORT_NO_LISTEN; /* we do not run any server */
 	info.protocols = protocols;
 
+	/*
+	 * since we know this lws context is only ever going to be used with
+	 * one client wsis / fds / sockets at a time, let lws know it doesn't
+	 * have to use the default allocations for fd tables up to ulimit -n.
+	 * It will just allocate for 1 internal and 1 (+ 1 http2 nwsi) that we
+	 * will use.
+	 */
+	info.fd_limit_per_thread = 1 + 1 + 1;
+
 #if defined(LWS_WITH_MBEDTLS)
 	/*
 	 * OpenSSL uses the system trust store.  mbedTLS has to be told which
@@ -146,7 +169,16 @@ int main(int argc, const char **argv)
 
 	memset(&i, 0, sizeof i); /* otherwise uninitialized garbage */
 	i.context = context;
-	i.ssl_connection = LCCSCF_USE_SSL;
+	if (!lws_cmdline_option(argc, argv, "-n")) {
+		i.ssl_connection = LCCSCF_USE_SSL;
+#if defined(LWS_WITH_HTTP2)
+		/* requires h2 */
+		if (lws_cmdline_option(argc, argv, "--long-poll")) {
+			lwsl_user("%s: long poll mode\n", __func__);
+			long_poll = 1;
+		}
+#endif
+	}
 
 	if (lws_cmdline_option(argc, argv, "-l")) {
 		i.port = 7681;
@@ -160,6 +192,9 @@ int main(int argc, const char **argv)
 	if (lws_cmdline_option(argc, argv, "--h1"))
 		i.alpn = "http/1.1";
 
+	if ((p = lws_cmdline_option(argc, argv, "-p")))
+		i.port = atoi(p);
+
 	i.path = "/";
 	i.host = i.address;
 	i.origin = i.address;
@@ -170,7 +205,7 @@ int main(int argc, const char **argv)
 	lws_client_connect_via_info(&i);
 
 	while (n >= 0 && client_wsi && !interrupted)
-		n = lws_service(context, 1000);
+		n = lws_service(context, 0);
 
 	lws_context_destroy(context);
 	lwsl_user("Completed: %s\n", bad ? "failed" : "OK");

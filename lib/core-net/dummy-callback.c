@@ -1,25 +1,28 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #if defined(LWS_WITH_HTTP_PROXY)
 static int
@@ -83,6 +86,172 @@ stream_close(struct lws *wsi)
 
 #endif
 
+struct lws_proxy_pkt {
+	struct lws_dll2 pkt_list;
+	size_t len;
+	char binary;
+	char first;
+	char final;
+
+	/* data follows */
+};
+
+#if defined(LWS_WITH_HTTP_PROXY) && defined(LWS_ROLE_WS)
+int
+lws_callback_ws_proxy(struct lws *wsi, enum lws_callback_reasons reason,
+			void *user, void *in, size_t len)
+{
+	struct lws_proxy_pkt *pkt;
+	struct lws_dll2 *dll;
+
+	switch (reason) {
+
+	/* h1 ws proxying... child / client / onward */
+
+	case LWS_CALLBACK_CLIENT_ESTABLISHED:
+		if (!wsi->h1_ws_proxied || !wsi->parent)
+			break;
+
+		lws_process_ws_upgrade2(wsi->parent);
+
+#if defined(LWS_WITH_HTTP2)
+		if (wsi->parent->http2_substream)
+			lwsl_info("%s: proxied h2 -> h1 ws established\n", __func__);
+#endif
+		break;
+
+	case LWS_CALLBACK_CLIENT_CONFIRM_EXTENSION_SUPPORTED:
+		return 1;
+
+	case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+	case LWS_CALLBACK_CLIENT_CLOSED:
+		lwsl_user("%s: client closed: parent %p\n", __func__, wsi->parent);
+		if (wsi->parent)
+                       lws_set_timeout(wsi->parent, 1, LWS_TO_KILL_ASYNC);
+		break;
+
+	case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
+	{
+		unsigned char **p = (unsigned char **)in, *end = (*p) + len,
+				    tmp[128];
+
+		proxy_header(wsi, wsi->parent, tmp, sizeof(tmp),
+			      WSI_TOKEN_HTTP_ACCEPT_LANGUAGE, p, end);
+
+		proxy_header(wsi, wsi->parent, tmp, sizeof(tmp),
+			      WSI_TOKEN_HTTP_COOKIE, p, end);
+
+		proxy_header(wsi, wsi->parent, tmp, sizeof(tmp),
+			      WSI_TOKEN_HTTP_SET_COOKIE, p, end);
+		break;
+	}
+
+	case LWS_CALLBACK_CLIENT_RECEIVE:
+		wsi->parent->ws->proxy_buffered += len;
+		if (wsi->parent->ws->proxy_buffered > 10 * 1024 * 1024) {
+			lwsl_err("%s: proxied ws connection excessive buffering: dropping\n",
+					__func__);
+			return -1;
+		}
+		pkt = lws_malloc(sizeof(*pkt) + LWS_PRE + len, __func__);
+		if (!pkt)
+			return -1;
+
+		pkt->pkt_list.prev = pkt->pkt_list.next = NULL;
+		pkt->len = len;
+		pkt->first = lws_is_first_fragment(wsi);
+		pkt->final = lws_is_final_fragment(wsi);
+		pkt->binary = lws_frame_is_binary(wsi);
+
+		memcpy(((uint8_t *)&pkt[1]) + LWS_PRE, in, len);
+
+		lws_dll2_add_tail(&pkt->pkt_list, &wsi->parent->ws->proxy_owner);
+		lws_callback_on_writable(wsi->parent);
+		break;
+
+	case LWS_CALLBACK_CLIENT_WRITEABLE:
+		dll = lws_dll2_get_tail(&wsi->ws->proxy_owner);
+		if (!dll)
+			break;
+
+		pkt = (struct lws_proxy_pkt *)dll;
+		if (lws_write(wsi, ((unsigned char *)&pkt[1]) +
+			      LWS_PRE, pkt->len, lws_write_ws_flags(
+				pkt->binary ? LWS_WRITE_BINARY : LWS_WRITE_TEXT,
+					pkt->first, pkt->final)) < 0)
+			return -1;
+
+		wsi->parent->ws->proxy_buffered -= pkt->len;
+
+		lws_dll2_remove(dll);
+		lws_free(pkt);
+
+		if (lws_dll2_get_tail(&wsi->ws->proxy_owner))
+			lws_callback_on_writable(wsi);
+		break;
+
+	/* h1 ws proxying... parent / server / incoming */
+
+	case LWS_CALLBACK_CONFIRM_EXTENSION_OKAY:
+		return 1;
+
+	case LWS_CALLBACK_CLOSED:
+		lwsl_user("%s: closed\n", __func__);
+		return -1;
+
+	case LWS_CALLBACK_RECEIVE:
+		pkt = lws_malloc(sizeof(*pkt) + LWS_PRE + len, __func__);
+		if (!pkt)
+			return -1;
+
+		pkt->pkt_list.prev = pkt->pkt_list.next = NULL;
+		pkt->len = len;
+		pkt->first = lws_is_first_fragment(wsi);
+		pkt->final = lws_is_final_fragment(wsi);
+		pkt->binary = lws_frame_is_binary(wsi);
+
+		memcpy(((uint8_t *)&pkt[1]) + LWS_PRE, in, len);
+
+		lws_dll2_add_tail(&pkt->pkt_list, &wsi->child_list->ws->proxy_owner);
+		lws_callback_on_writable(wsi->child_list);
+		break;
+
+	case LWS_CALLBACK_SERVER_WRITEABLE:
+		dll = lws_dll2_get_tail(&wsi->ws->proxy_owner);
+		if (!dll)
+			break;
+
+		pkt = (struct lws_proxy_pkt *)dll;
+		if (lws_write(wsi, ((unsigned char *)&pkt[1]) +
+			      LWS_PRE, pkt->len, lws_write_ws_flags(
+				pkt->binary ? LWS_WRITE_BINARY : LWS_WRITE_TEXT,
+					pkt->first, pkt->final)) < 0)
+			return -1;
+
+		lws_dll2_remove(dll);
+		lws_free(pkt);
+
+		if (lws_dll2_get_tail(&wsi->ws->proxy_owner))
+			lws_callback_on_writable(wsi);
+		break;
+
+	default:
+		return 0;
+	}
+
+	return 0;
+}
+
+const struct lws_protocols lws_ws_proxy = {
+		"lws-ws-proxy",
+		lws_callback_ws_proxy,
+		0,
+		8192,
+		8192, NULL, 0
+};
+
+#endif
+
 LWS_VISIBLE int
 lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 			void *user, void *in, size_t len)
@@ -92,7 +261,7 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 	struct lws_cgi_args *args;
 #endif
 #if defined(LWS_WITH_CGI) || defined(LWS_WITH_HTTP_PROXY)
-	char buf[8192];
+	char buf[LWS_PRE + 32 + 8192];
 	int n;
 #endif
 #if defined(LWS_WITH_HTTP_PROXY)
@@ -103,7 +272,7 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 	switch (reason) {
 #if defined(LWS_ROLE_H1) || defined(LWS_ROLE_H2)
 	case LWS_CALLBACK_HTTP:
-#ifndef LWS_NO_SERVER
+#if defined(LWS_WITH_SERVER)
 		if (lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL))
 			return -1;
 
@@ -111,15 +280,34 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 #endif
 			return -1;
 		break;
-#if !defined(LWS_NO_SERVER)
+#if defined(LWS_WITH_SERVER)
 	case LWS_CALLBACK_HTTP_BODY_COMPLETION:
+#if defined(LWS_WITH_HTTP_PROXY)
+		if (wsi->child_list) {
+			lwsl_user("%s: LWS_CALLBACK_HTTP_BODY_COMPLETION: %d\n", __func__, (int)len);
+			break;
+		}
+#endif
+		/* fallthru */
 	case LWS_CALLBACK_HTTP_FILE_COMPLETION:
 		if (lws_http_transaction_completed(wsi))
 			return -1;
 		break;
 #endif
 
+#if defined(LWS_WITH_HTTP_PROXY)
+	case LWS_CALLBACK_HTTP_BODY:
+		if (wsi->child_list) {
+			lwsl_user("%s: LWS_CALLBACK_HTTP_BODY: stashing %d\n", __func__, (int)len);
+			if (lws_buflist_append_segment(&wsi->http.buflist_post_body, in, len) < 0)
+				return -1;
+			lws_callback_on_writable(wsi->child_list);
+		}
+		break;
+#endif
+
 	case LWS_CALLBACK_HTTP_WRITEABLE:
+		// lwsl_err("%s: LWS_CALLBACK_HTTP_WRITEABLE\n", __func__);
 #ifdef LWS_WITH_CGI
 		if (wsi->reason_bf & (LWS_CB_REASON_AUX_BF__CGI_HEADERS |
 				      LWS_CB_REASON_AUX_BF__CGI)) {
@@ -166,12 +354,15 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 
 			wsi->reason_bf &= ~LWS_CB_REASON_AUX_BF__PROXY_HEADERS;
 
-			lwsl_debug("%s: %p: issuing proxy headers\n",
-				    __func__, wsi);
+			n = LWS_WRITE_HTTP_HEADERS;
+			if (!wsi->http.prh_content_length)
+				n |= LWS_WRITE_H2_STREAM_END;
+
+			lwsl_debug("%s: %p: issuing proxy headers: clen %d\n",
+				    __func__, wsi, (int)wsi->http.prh_content_length);
 			n = lws_write(wsi, wsi->http.pending_return_headers +
 					   LWS_PRE,
-				      wsi->http.pending_return_headers_len,
-				      LWS_WRITE_HTTP_HEADERS);
+				      wsi->http.pending_return_headers_len, n);
 
 			lws_free_set_NULL(wsi->http.pending_return_headers);
 
@@ -180,6 +371,7 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 					 __func__);
 				return -1;
 			}
+
 			lws_callback_on_writable(wsi);
 			break;
 		}
@@ -269,8 +461,8 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 			return -1;
 		break; }
 
+	/* h1 http proxying... */
 
-	/* this handles the proxy case... */
 	case LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP: {
 		unsigned char *start, *p, *end;
 
@@ -302,17 +494,21 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 		 */
 
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_CONTENT_LENGTH, &p, end);
+			     WSI_TOKEN_HTTP_CONTENT_LENGTH, &p, end);
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_CONTENT_TYPE, &p, end);
+			     WSI_TOKEN_HTTP_CONTENT_TYPE, &p, end);
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_ETAG, &p, end);
+			     WSI_TOKEN_HTTP_ETAG, &p, end);
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_ACCEPT_LANGUAGE, &p, end);
+			     WSI_TOKEN_HTTP_ACCEPT_LANGUAGE, &p, end);
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_CONTENT_ENCODING, &p, end);
+			     WSI_TOKEN_HTTP_CONTENT_ENCODING, &p, end);
 		proxy_header(parent, wsi, end, 256,
-				WSI_TOKEN_HTTP_CACHE_CONTROL, &p, end);
+			     WSI_TOKEN_HTTP_CACHE_CONTROL, &p, end);
+		proxy_header(parent, wsi, end, 256,
+			     WSI_TOKEN_HTTP_SET_COOKIE, &p, end);
+		proxy_header(parent, wsi, end, 256,
+			     WSI_TOKEN_HTTP_LOCATION, &p, end);
 
 		if (!parent->http2_substream)
 			if (lws_add_http_header_by_token(parent,
@@ -342,8 +538,13 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 		if (lws_finalize_http_header(parent, &p, end))
 			return 1;
 
-		parent->http.pending_return_headers_len =
-					lws_ptr_diff(p, start);
+		parent->http.prh_content_length = -1;
+		if (lws_hdr_simple_ptr(wsi, WSI_TOKEN_HTTP_CONTENT_LENGTH))
+			parent->http.prh_content_length = atoll(
+				lws_hdr_simple_ptr(wsi,
+						WSI_TOKEN_HTTP_CONTENT_LENGTH));
+
+		parent->http.pending_return_headers_len = lws_ptr_diff(p, start);
 		parent->http.pending_return_headers =
 			lws_malloc(parent->http.pending_return_headers_len +
 				    LWS_PRE, "return proxy headers");
@@ -356,7 +557,16 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 		parent->reason_bf |= LWS_CB_REASON_AUX_BF__PROXY_HEADERS;
 
 		lwsl_debug("%s: LWS_CALLBACK_ESTABLISHED_CLIENT_HTTP: "
-			   "prepared headers\n", __func__);
+			   "prepared %d headers (len %d)\n", __func__,
+			   lws_http_client_http_response(wsi),
+			   (int)parent->http.prh_content_length);
+
+		/*
+		 * so at this point, the onward client connection can bear
+		 * traffic.  We might be doing a POST and have pending cached
+		 * inbound stuff to send, it can go now.
+		 */
+
 		lws_callback_on_writable(parent);
 
 		break; }
@@ -374,14 +584,13 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 	case LWS_CALLBACK_CLOSED_CLIENT_HTTP:
 		if (!lws_get_parent(wsi))
 			break;
-		lwsl_err("%s: LWS_CALLBACK_CLOSED_CLIENT_HTTP\n", __func__);
-		lws_set_timeout(lws_get_parent(wsi), LWS_TO_KILL_ASYNC,
-				PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE);
+	//	lwsl_err("%s: LWS_CALLBACK_CLOSED_CLIENT_HTTP\n", __func__);
+               lws_set_timeout(lws_get_parent(wsi), LWS_TO_KILL_ASYNC,
+                               PENDING_TIMEOUT_KILLED_BY_PROXY_CLIENT_CLOSE);
 		break;
 
 	case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER:
 		parent = lws_get_parent(wsi);
-
 		if (!parent)
 			break;
 
@@ -394,8 +603,6 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 		 */
 
 		proxy_header(wsi, parent, (unsigned char *)buf, sizeof(buf),
-				WSI_TOKEN_HOST, p, end);
-		proxy_header(wsi, parent, (unsigned char *)buf, sizeof(buf),
 				WSI_TOKEN_HTTP_ETAG, p, end);
 		proxy_header(wsi, parent, (unsigned char *)buf, sizeof(buf),
 				WSI_TOKEN_HTTP_IF_MODIFIED_SINCE, p, end);
@@ -405,6 +612,8 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 				WSI_TOKEN_HTTP_ACCEPT_ENCODING, p, end);
 		proxy_header(wsi, parent, (unsigned char *)buf, sizeof(buf),
 				WSI_TOKEN_HTTP_CACHE_CONTROL, p, end);
+		proxy_header(wsi, parent, (unsigned char *)buf, sizeof(buf),
+				WSI_TOKEN_HTTP_COOKIE, p, end);
 
 		buf[0] = '\0';
 		lws_get_peer_simple(parent, buf, sizeof(buf));
@@ -413,7 +622,6 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 			return -1;
 
 		break;
-
 #endif
 
 #ifdef LWS_WITH_CGI
@@ -575,9 +783,10 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 				__remove_wsi_socket_from_fds(siwsi);
 				lwsi_set_state(siwsi, LRS_DEAD_SOCKET);
 				siwsi->socket_is_permanently_unusable = 1;
-				lws_remove_child_from_any_parent(siwsi);
+//				lws_remove_child_from_any_parent(siwsi);
 				if (wsi->context->event_loop_ops->
 							close_handle_manually) {
+
 					wsi->context->event_loop_ops->
 						close_handle_manually(siwsi);
 					siwsi->told_event_loop_closed = 1;
@@ -587,7 +796,7 @@ lws_callback_http_dummy(struct lws *wsi, enum lws_callback_reasons reason,
 				}
 				wsi->http.cgi->pipe_fds[LWS_STDIN][1] = -1;
 
-				args->stdwsi[LWS_STDIN] = NULL;
+//				args->stdwsi[LWS_STDIN] = NULL;
 			}
 		}
 

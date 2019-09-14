@@ -1,7 +1,7 @@
 /*
  * lws-api-test-jose - RFC7515 jws tests
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -535,7 +535,7 @@ bail1:
 	lws_jose_destroy(&jose);
 
 bail:
-	lwsl_notice("%s: selftest %s\n", __func__, ret < 0 ? "FAIL" : "OK");
+	lwsl_notice("%s: selftest %s\n", __func__, ret ? "FAIL" : "OK");
 
 	return ret;
 }
@@ -692,7 +692,7 @@ bail1:
 	lws_jose_destroy(&jose);
 
 bail:
-	lwsl_notice("%s: selftest %s\n", __func__, ret < 0 ? "FAIL" : "OK");
+	lwsl_notice("%s: selftest %s\n", __func__, ret ? "FAIL" : "OK");
 
 	return ret;
 }

@@ -1,25 +1,28 @@
 /*
- * libwebsockets web server application
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
+#include "private-lib-core.h"
 
 #ifndef _WIN32
 /* this is needed for Travis CI */
@@ -31,6 +34,8 @@
 static const char * const paths_global[] = {
 	"global.uid",
 	"global.gid",
+	"global.username",
+	"global.groupname",
 	"global.count-threads",
 	"global.init-ssl",
 	"global.server-string",
@@ -40,11 +45,15 @@ static const char * const paths_global[] = {
 	"global.reject-service-keywords[].*",
 	"global.reject-service-keywords[]",
 	"global.default-alpn",
+	"global.ip-limit-ah",
+	"global.ip-limit-wsi",
 };
 
 enum lejp_global_paths {
 	LEJPGP_UID,
 	LEJPGP_GID,
+	LEJPGP_USERNAME,
+	LEJPGP_GROUPNAME,
 	LEJPGP_COUNT_THREADS,
 	LWJPGP_INIT_SSL,
 	LEJPGP_SERVER_STRING,
@@ -54,6 +63,8 @@ enum lejp_global_paths {
 	LWJPGP_REJECT_SERVICE_KEYWORDS_NAME,
 	LWJPGP_REJECT_SERVICE_KEYWORDS,
 	LWJPGP_DEFAULT_ALPN,
+	LWJPGP_IP_LIMIT_AH,
+	LWJPGP_IP_LIMIT_WSI,
 };
 
 static const char * const paths_vhosts[] = {
@@ -63,6 +74,7 @@ static const char * const paths_vhosts[] = {
 	"vhosts[].port",
 	"vhosts[].interface",
 	"vhosts[].unix-socket",
+	"vhosts[].unix-socket-perms",
 	"vhosts[].sts",
 	"vhosts[].host-ssl-key",
 	"vhosts[].host-ssl-cert",
@@ -118,6 +130,9 @@ static const char * const paths_vhosts[] = {
 	"vhosts[].allow-non-tls",
 	"vhosts[].redirect-http",
 	"vhosts[].allow-http-on-https",
+
+	"vhosts[].disable-no-protocol-ws-upgrades",
+	"vhosts[].h2-half-closed-long-poll",
 };
 
 enum lejp_vhost_paths {
@@ -127,6 +142,7 @@ enum lejp_vhost_paths {
 	LEJPVP_PORT,
 	LEJPVP_INTERFACE,
 	LEJPVP_UNIXSKT,
+	LEJPVP_UNIXSKT_PERMS,
 	LEJPVP_STS,
 	LEJPVP_HOST_SSL_KEY,
 	LEJPVP_HOST_SSL_CERT,
@@ -182,33 +198,9 @@ enum lejp_vhost_paths {
 	LEJPVP_FLAG_ALLOW_NON_TLS,
 	LEJPVP_FLAG_REDIRECT_HTTP,
 	LEJPVP_FLAG_ALLOW_HTTP_ON_HTTPS,
-};
 
-static const char * const parser_errs[] = {
-	"",
-	"",
-	"No opening '{'",
-	"Expected closing '}'",
-	"Expected '\"'",
-	"String underrun",
-	"Illegal unescaped control char",
-	"Illegal escape format",
-	"Illegal hex number",
-	"Expected ':'",
-	"Illegal value start",
-	"Digit required after decimal point",
-	"Bad number format",
-	"Bad exponent format",
-	"Unknown token",
-	"Too many ']'",
-	"Mismatched ']'",
-	"Expected ']'",
-	"JSON nesting limit exceeded",
-	"Nesting tracking used up",
-	"Number too long",
-	"Comma or block end expected",
-	"Unknown",
-	"Parser callback errored (see earlier error)",
+	LEJPVP_FLAG_DISABLE_NO_PROTOCOL_WS_UPGRADES,
+	LEJPVP_FLAG_H2_HALF_CLOSED_LONG_POLL,
 };
 
 #define MAX_PLUGIN_DIRS 10
@@ -217,6 +209,7 @@ struct jpargs {
 	struct lws_context_creation_info *info;
 	struct lws_context *context;
 	const struct lws_protocols *protocols;
+	const struct lws_protocols **pprotocols;
 	const struct lws_extension *extensions;
 	char *p, *end, valid;
 	struct lws_http_mount *head, *last;
@@ -228,6 +221,7 @@ struct jpargs {
 	const char **plugin_dirs;
 	int count_plugin_dirs;
 
+	unsigned int reject_ws_with_no_protocol:1;
 	unsigned int enable_client_ssl:1;
 	unsigned int fresh_mount:1;
 	unsigned int any_vhosts:1;
@@ -262,7 +256,7 @@ arg_to_bool(const char *s)
 }
 
 static void
-set_reset_flag(unsigned int *p, const char *state, unsigned int flag)
+set_reset_flag(uint64_t *p, const char *state, uint64_t flag)
 {
 	if (arg_to_bool(state))
 		*p |= flag;
@@ -306,6 +300,12 @@ lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 	case LEJPGP_GID:
 		a->info->gid = atoi(ctx->buf);
 		return 0;
+	case LEJPGP_USERNAME:
+		a->info->username = a->p;
+		break;
+	case LEJPGP_GROUPNAME:
+		a->info->groupname = a->p;
+		break;
 	case LEJPGP_COUNT_THREADS:
 		a->info->count_threads = atoi(ctx->buf);
 		return 0;
@@ -314,7 +314,9 @@ lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 			a->info->options |= LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
 		return 0;
 	case LEJPGP_SERVER_STRING:
+#if defined(LWS_WITH_SERVER)
 		a->info->server_string = a->p;
+#endif
 		break;
 	case LEJPGP_PLUGIN_DIR:
 		if (a->count_plugin_dirs == MAX_PLUGIN_DIRS - 1) {
@@ -335,6 +337,14 @@ lejp_globals_cb(struct lejp_ctx *ctx, char reason)
 	case LWJPGP_DEFAULT_ALPN:
 		a->info->alpn = a->p;
 		break;
+
+	case LWJPGP_IP_LIMIT_AH:
+		a->info->ip_limit_ah = atoi(ctx->buf);
+		return 0;
+
+	case LWJPGP_IP_LIMIT_WSI:
+		a->info->ip_limit_wsi = atoi(ctx->buf);
+		return 0;
 
 	default:
 		return 0;
@@ -364,9 +374,12 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 
 	if (reason == LEJPCB_OBJECT_START && ctx->path_match == LEJPVP + 1) {
 		uint32_t i[4];
+#if defined(LWS_WITH_SERVER)
 		const char *ss;
+#endif
 
 		/* set the defaults for this vhost */
+		a->reject_ws_with_no_protocol = 0;
 		a->valid = 1;
 		a->head = NULL;
 		a->last = NULL;
@@ -381,7 +394,9 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 			LWS_SERVER_OPTION_LIBEVENT |
 			LWS_SERVER_OPTION_LIBEV
 				);
+#if defined(LWS_WITH_SERVER)
 		ss = a->info->server_string;
+#endif
 		i[2] = a->info->ws_ping_pong_interval;
 		i[3] = a->info->timeout_secs;
 
@@ -389,11 +404,14 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 
 		a->info->count_threads = i[0];
 		a->info->options = i[1];
+#if defined(LWS_WITH_SERVER)
 		a->info->server_string = ss;
+#endif
 		a->info->ws_ping_pong_interval = i[2];
 		a->info->timeout_secs = i[3];
 
 		a->info->protocols = a->protocols;
+		a->info->pprotocols = a->pprotocols;
 		a->info->extensions = a->extensions;
 #if defined(LWS_WITH_TLS)
 		a->info->client_ssl_cipher_list = "ECDHE-ECDSA-AES256-GCM-SHA384:"
@@ -502,6 +520,12 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 		}
 		a->any_vhosts = 1;
 
+		if (a->reject_ws_with_no_protocol) {
+			a->reject_ws_with_no_protocol = 0;
+
+			vhost->default_protocol_index = 255;
+		}
+
 #if defined(LWS_WITH_TLS)
 		if (a->enable_client_ssl) {
 			const char *cert_filepath =
@@ -596,6 +620,9 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 		else
 			a->info->options &= ~(LWS_SERVER_OPTION_UNIX_SOCK);
 		return 0;
+	case LEJPVP_UNIXSKT_PERMS:
+		a->info->unix_socket_perms = a->p;
+		break;
 	case LEJPVP_STS:
 		if (arg_to_bool(ctx->buf))
 			a->info->options |= LWS_SERVER_OPTION_STS;
@@ -835,6 +862,15 @@ lejp_vhosts_cb(struct lejp_ctx *ctx, char reason)
 			       LWS_SERVER_OPTION_ALLOW_HTTP_ON_HTTPS_LISTENER);
 		return 0;
 
+	case LEJPVP_FLAG_DISABLE_NO_PROTOCOL_WS_UPGRADES:
+		a->reject_ws_with_no_protocol = 1;
+		return 0;
+
+	case LEJPVP_FLAG_H2_HALF_CLOSED_LONG_POLL:
+		set_reset_flag(&a->info->options, ctx->buf,
+				LWS_SERVER_OPTION_VH_H2_HALF_CLOSED_LONG_POLL);
+		return 0;
+
 	default:
 		return 0;
 	}
@@ -871,7 +907,7 @@ lwsws_get_config(void *user, const char *f, const char * const *paths,
 {
 	unsigned char buf[128];
 	struct lejp_ctx ctx;
-	int n, m, fd;
+	int n, m = 0, fd;
 
 	fd = lws_open(f, O_RDONLY);
 	if (fd < 0) {
@@ -895,107 +931,41 @@ lwsws_get_config(void *user, const char *f, const char * const *paths,
 
 	if (m < 0) {
 		lwsl_err("%s(%u): parsing error %d: %s\n", f, n, m,
-			 parser_errs[-m]);
+			 lejp_error_to_string(m));
 		return 2;
 	}
 
 	return 0;
 }
 
-#if defined(LWS_WITH_LIBUV) && UV_VERSION_MAJOR > 0
+struct lws_dir_args {
+	void *user;
+	const char * const *paths;
+	int count_paths;
+	lejp_callback cb;
+};
 
 static int
-lwsws_get_config_d(void *user, const char *d, const char * const *paths,
-		   int count_paths, lejp_callback cb)
+lwsws_get_config_d_cb(const char *dirpath, void *user,
+		      struct lws_dir_entry *lde)
 {
-	uv_dirent_t dent;
-	uv_fs_t req;
+	struct lws_dir_args *da = (struct lws_dir_args *)user;
 	char path[256];
-	int ret = 0, ir;
-	uv_loop_t loop;
 
-	ir = uv_loop_init(&loop);
-	if (ir) {
-		lwsl_err("%s: loop init failed %d\n", __func__, ir);
-	}
-
-	if (!uv_fs_scandir(&loop, &req, d, 0, NULL)) {
-		lwsl_err("Scandir on %s failed\n", d);
-		return 2;
-	}
-
-	while (uv_fs_scandir_next(&req, &dent) != UV_EOF) {
-		lws_snprintf(path, sizeof(path) - 1, "%s/%s", d, dent.name);
-		ret = lwsws_get_config(user, path, paths, count_paths, cb);
-		if (ret)
-			goto bail;
-	}
-
-bail:
-	uv_fs_req_cleanup(&req);
-	while (uv_loop_close(&loop))
-		;
-
-	return ret;
-}
-
-#else
-
-#ifndef _WIN32
-static int filter(const struct dirent *ent)
-{
-	if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
+	if (lde->type != LDOT_FILE && lde->type != LDOT_UNKNOWN /* ZFS */)
 		return 0;
 
-	return 1;
+	lws_snprintf(path, sizeof(path) - 1, "%s/%s", dirpath, lde->name);
+
+	return lwsws_get_config(da->user, path, da->paths,
+				da->count_paths, da->cb);
 }
-#endif
-
-static int
-lwsws_get_config_d(void *user, const char *d, const char * const *paths,
-		   int count_paths, lejp_callback cb)
-{
-#if !defined(_WIN32) && !defined(LWS_WITH_ESP32)
-	struct dirent **namelist;
-	char path[256];
-	int n, i, ret = 0;
-
-	n = scandir((char *) d, &namelist, filter, alphasort);
-	if (n < 0) {
-		lwsl_err("Scandir on %s failed\n", d);
-		return 1;
-	}
-
-	for (i = 0; i < n; i++) {
-		if (strchr(namelist[i]->d_name, '~'))
-			goto skip;
-		lws_snprintf(path, sizeof(path) - 1, "%s/%s", d,
-			 namelist[i]->d_name);
-		ret = lwsws_get_config(user, path, paths, count_paths, cb);
-		if (ret) {
-			while (i++ < n)
-				free(namelist[i]);
-			goto bail;
-		}
-skip:
-		free(namelist[i]);
-	}
-
-bail:
-	free(namelist);
-
-	return ret;
-#else
-	return 0;
-#endif
-}
-
-#endif
 
 int
 lwsws_get_config_globals(struct lws_context_creation_info *info, const char *d,
 			 char **cs, int *len)
 {
+	struct lws_dir_args da;
 	struct jpargs a;
 	const char * const *old = info->plugin_dirs;
 	char dd[128];
@@ -1024,9 +994,13 @@ lwsws_get_config_globals(struct lws_context_creation_info *info, const char *d,
 			     LWS_ARRAY_SIZE(paths_global), lejp_globals_cb) > 1)
 		return 1;
 	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
-	if (lwsws_get_config_d(&a, dd, paths_global,
-			       LWS_ARRAY_SIZE(paths_global),
-			       lejp_globals_cb) > 1)
+
+	da.user = &a;
+	da.paths = paths_global;
+	da.count_paths = LWS_ARRAY_SIZE(paths_global),
+	da.cb = lejp_globals_cb;
+
+	if (lws_dir(dd, &da, lwsws_get_config_d_cb) > 1)
 		return 1;
 
 	a.plugin_dirs[a.count_plugin_dirs] = NULL;
@@ -1042,6 +1016,7 @@ lwsws_get_config_vhosts(struct lws_context *context,
 			struct lws_context_creation_info *info, const char *d,
 			char **cs, int *len)
 {
+	struct lws_dir_args da;
 	struct jpargs a;
 	char dd[128];
 
@@ -1053,6 +1028,7 @@ lwsws_get_config_vhosts(struct lws_context *context,
 	a.valid = 0;
 	a.context = context;
 	a.protocols = info->protocols;
+	a.pprotocols = info->pprotocols;
 	a.extensions = info->extensions;
 
 	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf", d);
@@ -1060,8 +1036,13 @@ lwsws_get_config_vhosts(struct lws_context *context,
 			     LWS_ARRAY_SIZE(paths_vhosts), lejp_vhosts_cb) > 1)
 		return 1;
 	lws_snprintf(dd, sizeof(dd) - 1, "%s/conf.d", d);
-	if (lwsws_get_config_d(&a, dd, paths_vhosts,
-			       LWS_ARRAY_SIZE(paths_vhosts), lejp_vhosts_cb) > 1)
+
+	da.user = &a;
+	da.paths = paths_vhosts;
+	da.count_paths = LWS_ARRAY_SIZE(paths_vhosts),
+	da.cb = lejp_vhosts_cb;
+
+	if (lws_dir(dd, &da, lwsws_get_config_d_cb) > 1)
 		return 1;
 
 	*cs = a.p;

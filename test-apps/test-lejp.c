@@ -1,22 +1,14 @@
 /*
- * Lightweight Embedded JSON Parser
+ * lejp test app
  *
- * Copyright (C) 2013-2017 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * This file is made available under the Creative Commons CC0 1.0
+ * Universal Public Domain Dedication.
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
- *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * This demonstrates a minimal http server that performs a form GET with a couple
+ * of parameters.  It dumps the parameters to the console log and redirects
+ * to another page.
  */
 
 #include <libwebsockets.h>
@@ -42,6 +34,7 @@ static const char * const reason_names[] = {
 	"LEJPCB_ARRAY_END",
 	"LEJPCB_OBJECT_START",
 	"LEJPCB_OBJECT_END",
+	"LEJPCB_OBJECT_END_PRE",
 };
 
 static const char * const tok[] = {
@@ -52,6 +45,11 @@ static signed char
 cb(struct lejp_ctx *ctx, char reason)
 {
 	char buf[1024], *p = buf, *end = &buf[sizeof(buf)];
+	int n;
+
+	for (n = 0; n < ctx->sp; n++)
+		*p++ = ' ';
+	*p = '\0';
 
 	if (reason & LEJP_FLAG_CB_IS_VALUE) {
 		p += lws_snprintf(p, p - end, "   value '%s' ", ctx->buf);
@@ -73,12 +71,16 @@ cb(struct lejp_ctx *ctx, char reason)
 
 	switch (reason) {
 	case LEJPCB_COMPLETE:
-		lwsl_notice("Parsing Completed (LEJPCB_COMPLETE)\n");
+		lwsl_notice("%sParsing Completed (LEJPCB_COMPLETE)\n", buf);
 		break;
 	case LEJPCB_PAIR_NAME:
-		lwsl_notice("path: '%s' (LEJPCB_PAIR_NAME)\n", ctx->path);
+		lwsl_notice("%spath: '%s' (LEJPCB_PAIR_NAME)\n", buf, ctx->path);
 		break;
 	}
+
+	lwsl_notice("%s%s: path %s match %d statckp %d\r\n", buf, reason_names[(unsigned int)
+		(reason) & (LEJP_FLAG_CB_IS_VALUE - 1)], ctx->path,
+		ctx->path_match, ctx->pst[ctx->pst_sp].ppos);
 
 	return 0;
 }

@@ -1,26 +1,29 @@
 /*
- * libwebsockets - lws alloc chunk
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#include "core/private.h"
-#include "misc/lwsac/private.h"
+#include "private-lib-core.h"
+#include "private-lib-misc-lwsac.h"
 
 void
 lws_list_ptr_insert(lws_list_ptr *head, lws_list_ptr *add,
@@ -131,11 +134,34 @@ lwsac_use(struct lwsac **head, size_t ensure, size_t chunk_size)
 	return (char *)(*head)->curr + ofs;
 }
 
+void *
+lwsac_use_zero(struct lwsac **head, size_t ensure, size_t chunk_size)
+{
+	void *p = lwsac_use(head, ensure, chunk_size);
+
+	if (p)
+		memset(p, 0, ensure);
+
+	return p;
+}
+
+void *
+lwsac_use_zeroed(struct lwsac **head, size_t ensure, size_t chunk_size)
+{
+	void *r = lwsac_use(head, ensure, chunk_size);
+
+	if (r)
+		memset(r, 0, ensure);
+
+	return r;
+}
+
 void
 lwsac_free(struct lwsac **head)
 {
 	struct lwsac *it = *head;
 
+	*head = NULL;
 	lwsl_debug("%s: head %p\n", __func__, *head);
 
 	while (it) {
@@ -144,14 +170,15 @@ lwsac_free(struct lwsac **head)
 		free(it);
 		it = tmp;
 	}
-
-	*head = NULL;
 }
 
 void
 lwsac_info(struct lwsac *head)
 {
-	lwsl_debug("%s: lac %p: %dKiB in %d blocks\n", __func__, head,
+	if (!head)
+		lwsl_debug("%s: empty\n", __func__);
+	else
+		lwsl_debug("%s: lac %p: %dKiB in %d blocks\n", __func__, head,
 		   (int)(head->total_alloc_size >> 10), head->total_blocks);
 }
 

@@ -1,7 +1,7 @@
 /*
  * ws protocol handler plugin for "POST demo"
  *
- * Copyright (C) 2010-2016 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -106,6 +106,8 @@ file_upload_cb(void *data, const char *name, const char *filename,
 		close((int)(long long)pss->fd);
 		pss->fd = LWS_INVALID_FILE;
 #endif
+		break;
+	case LWS_UFS_CLOSE:
 		break;
 	}
 
@@ -223,8 +225,7 @@ callback_post_demo(struct lws *wsi, enum lws_callback_reasons reason,
 
 			/* first send the headers ... */
 			n = lws_write(wsi, start, lws_ptr_diff(p, start),
-				      LWS_WRITE_HTTP_HEADERS |
-				      LWS_WRITE_H2_STREAM_END);
+				      LWS_WRITE_HTTP_HEADERS);
 			if (n < 0)
 				goto bail;
 

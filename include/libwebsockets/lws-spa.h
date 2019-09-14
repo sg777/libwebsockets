@@ -1,24 +1,25 @@
 /*
  * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
- *
- * included from libwebsockets.h
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
 /** \defgroup form-parsing  Form Parsing
@@ -47,8 +48,10 @@ enum lws_spa_fileupload_states {
 	/**< a chunk of file content has arrived */
 	LWS_UFS_FINAL_CONTENT,
 	/**< the last chunk (possibly zero length) of file content has arrived */
-	LWS_UFS_OPEN
+	LWS_UFS_OPEN,
 	/**< a new file is starting to arrive */
+	LWS_UFS_CLOSE
+	/**< the file decode stuff is being destroyed */
 };
 
 /**
@@ -84,6 +87,9 @@ struct lws_spa;
  *
  * Creates a urldecode parser and initializes it.
  *
+ * It's recommended to use the newer api, lws_spa_create_via_info()
+ * instead.
+ *
  * opt_cb can be NULL if you just want normal name=value parsing, however
  * if one or more entries in your form are bulk data (file transfer), you
  * can provide this callback and filter on the name callback parameter to
@@ -94,6 +100,36 @@ LWS_VISIBLE LWS_EXTERN struct lws_spa *
 lws_spa_create(struct lws *wsi, const char * const *param_names,
 	       int count_params, int max_storage, lws_spa_fileupload_cb opt_cb,
 	       void *opt_data);
+
+typedef struct lws_spa_create_info {
+	const char * const *param_names; /* array of form parameter names, like "username" */
+	int count_params; /* count of param_names */
+	int max_storage; /* total amount of form parameter values we can store */
+	lws_spa_fileupload_cb opt_cb; /* NULL, or callback to receive file upload data. */
+	void *opt_data; /* NULL, or user pointer provided to opt_cb. */
+	size_t param_names_stride; /* 0 if param_names is an array of char *.
+					Else stride to next char * */
+	struct lwsac **ac;	/* NULL, or pointer to lwsac * to contain all
+				   related heap allocations */
+	size_t ac_chunk_size;	/* 0 for default, or ac chunk size */
+} lws_spa_create_info_t;
+
+/**
+ * lws_spa_create_via_info() - create urldecode parser
+ *
+ * \param wsi: lws connection (used to find Content Type)
+ * \param info: pointer to struct defining the arguments
+ *
+ * Creates a urldecode parser and initializes it.
+ *
+ * opt_cb can be NULL if you just want normal name=value parsing, however
+ * if one or more entries in your form are bulk data (file transfer), you
+ * can provide this callback and filter on the name callback parameter to
+ * treat that urldecoded data separately.  The callback should return -1
+ * in case of fatal error, and 0 if OK.
+ */
+LWS_VISIBLE LWS_EXTERN struct lws_spa *
+lws_spa_create_via_info(struct lws *wsi, const lws_spa_create_info_t *info);
 
 /**
  * lws_spa_process() - parses a chunk of input data

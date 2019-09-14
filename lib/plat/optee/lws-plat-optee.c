@@ -1,4 +1,28 @@
-#include "core/private.h"
+/*
+ * libwebsockets - small server side websockets and web server implementation
+ *
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+ */
+
+#include "private-lib-core.h"
 
 #if !defined(LWS_WITH_NETWORK)
 #include <crypto/crypto.h>
@@ -43,7 +67,7 @@ int lws_plat_apply_FD_CLOEXEC(int n)
 void TEE_GenerateRandom(void *randomBuffer, uint32_t randomBufferLen);
 #if defined(LWS_WITH_NETWORK)
 uint64_t
-lws_time_in_microseconds(void)
+lws_now_usecs(void)
 {
 	return ((unsigned long long)time(NULL)) * 1000000;
 }
@@ -93,16 +117,24 @@ void lwsl_emit_optee(int level, const char *line)
         n = strlen(line);
         if ((unsigned int)n > sizeof(linecp) - 1)
                 n = sizeof(linecp) - 1;
-        if (n)
+        if (n) {
                 memcpy(linecp, line, n - 1);
-        linecp[n - 1] = '\0';
+	        linecp[n - 1] = '\0';
+	} else
+		linecp[0] = '\0';
         EMSG("%c%s%s%s%c[0m", 27, colours[m], buf, linecp, 27);
 }
 
-
-void
-lws_plat_drop_app_privileges(const struct lws_context_creation_info *info)
+int
+lws_plat_set_nonblocking(int fd)
 {
+	return 0;
+}
+
+int
+lws_plat_drop_app_privileges(struct lws_context *context, int actually_init)
+{
+	return 0;
 }
 
 int

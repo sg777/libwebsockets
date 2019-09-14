@@ -1,7 +1,7 @@
 /*
  * lws-minimal-http-client-multi
  *
- * Copyright (C) 2018 Andy Green <andy@warmcat.com>
+ * Written in 2010-2019 by Andy Green <andy@warmcat.com>
  *
  * This file is made available under the Creative Commons CC0 1.0
  * Universal Public Domain Dedication.
@@ -40,9 +40,12 @@ struct user {
 	int index;
 };
 
-static int interrupted, completed, failed, numbered;
+static int interrupted, completed, failed, numbered, stagger_idx;
 static struct lws *client_wsi[COUNT];
 static struct user user[COUNT];
+static lws_sorted_usec_list_t sul_stagger;
+static struct lws_client_connect_info i;
+struct lws_context *context;
 
 static int
 callback_http(struct lws *wsi, enum lws_callback_reasons reason,
@@ -147,6 +150,29 @@ sigint_handler(int sig)
 	interrupted = 1;
 }
 
+#if defined(WIN32)
+int gettimeofday(struct timeval * tp, struct timezone * tzp)
+{
+    // Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+    // This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
+    // until 00:00:00 January 1, 1970 
+    static const uint64_t EPOCH = ((uint64_t) 116444736000000000ULL);
+
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime( &system_time );
+    SystemTimeToFileTime( &system_time, &file_time );
+    time =  ((uint64_t)file_time.dwLowDateTime )      ;
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    tp->tv_sec  = (long) ((time - EPOCH) / 10000000L);
+    tp->tv_usec = (long) (system_time.wMilliseconds * 1000);
+    return 0;
+}
+#endif
+
 unsigned long long us(void)
 {
 	struct timeval t;
@@ -182,12 +208,32 @@ lws_try_client_connection(struct lws_client_connect_info *i, int m)
 			  client_wsi[m], m, i->path);
 }
 
+static void
+stagger_cb(lws_sorted_usec_list_t *sul)
+{
+	lws_usec_t next;
+
+	/*
+	 * open the connections at 100ms intervals, with the
+	 * last one being after 1s, testing both queuing, and
+	 * direct H2 stream addition stability
+	 */
+	lws_try_client_connection(&i, stagger_idx++);
+
+	if (stagger_idx == (int)LWS_ARRAY_SIZE(client_wsi))
+		return;
+
+	next = 300 * LWS_US_PER_MS;
+	if (stagger_idx == (int)LWS_ARRAY_SIZE(client_wsi) - 1)
+		next += 700 * LWS_US_PER_MS;
+
+	lws_sul_schedule(context, 0, &sul_stagger, stagger_cb, next);
+}
+
 int main(int argc, const char **argv)
 {
 	struct lws_context_creation_info info;
-	struct lws_client_connect_info i;
-	struct lws_context *context;
-	unsigned long long start, next;
+	unsigned long long start;
 	const char *p;
 	int n = 0, m, staggered = 0, logs =
 		LLL_USER | LLL_ERR | LLL_WARN | LLL_NOTICE
@@ -215,6 +261,14 @@ int main(int argc, const char **argv)
 	info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT;
 	info.port = CONTEXT_PORT_NO_LISTEN; /* we do not run any server */
 	info.protocols = protocols;
+	/*
+	 * since we know this lws context is only ever going to be used with
+	 * COUNT client wsis / fds / sockets at a time, let lws know it doesn't
+	 * have to use the default allocations for fd tables up to ulimit -n.
+	 * It will just allocate for 1 internal and COUNT + 1 (allowing for h2
+	 * network wsi) that we will use.
+	 */
+	info.fd_limit_per_thread = 1 + COUNT + 1;
 
 #if defined(LWS_WITH_MBEDTLS)
 	/*
@@ -222,6 +276,11 @@ int main(int argc, const char **argv)
 	 * CA to trust explicitly.
 	 */
 	info.client_ssl_ca_filepath = "./warmcat.com.cer";
+#endif
+
+#if defined(LWS_WITH_DETAILED_LATENCY)
+	info.detailed_latency_cb = lws_det_lat_plot_cb;
+	info.detailed_latency_filepath = "/tmp/lws-latency-results";
 #endif
 
 	context = lws_create_context(&info);
@@ -256,6 +315,9 @@ int main(int argc, const char **argv)
 	if ((p = lws_cmdline_option(argc, argv, "--port")))
 		i.port = atoi(p);
 
+	if ((p = lws_cmdline_option(argc, argv, "--server")))
+		i.address = p;
+
 	i.host = i.address;
 	i.origin = i.address;
 	i.method = "GET";
@@ -268,30 +330,17 @@ int main(int argc, const char **argv)
 		 */
 		for (m = 0; m < (int)LWS_ARRAY_SIZE(client_wsi); m++)
 			lws_try_client_connection(&i, m);
+	else
+		/*
+		 * delay the connections slightly
+		 */
+		lws_sul_schedule(context, 0, &sul_stagger, stagger_cb,
+				 100 * LWS_US_PER_MS);
 
-	next = start = us();
+	start = us();
 	m = 0;
-	while (n >= 0 && !interrupted) {
-
-		if (staggered) {
-			/*
-			 * open the connections at 100ms intervals, with the
-			 * last one being after 1s, testing both queuing, and
-			 * direct H2 stream addition stability
-			 */
-			if (us() > next && m < (int)LWS_ARRAY_SIZE(client_wsi)) {
-
-				lws_try_client_connection(&i, m++);
-
-				if (m == (int)LWS_ARRAY_SIZE(client_wsi) - 1)
-					next = us() + 1000000;
-				else
-					next = us() + 300000;
-			}
-		}
-
-		n = lws_service(context, 100);
-	}
+	while (n >= 0 && !interrupted)
+		n = lws_service(context, 0);
 
 	lwsl_user("Duration: %lldms\n", (us() - start) / 1000);
 	lws_context_destroy(context);

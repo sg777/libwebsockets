@@ -1,22 +1,25 @@
 /*
- * libwebsockets - lws-plugin-ssh-base - sshd.c
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2017 - 2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
 #include "libwebsockets.h"
@@ -1015,12 +1018,14 @@ again:
 
 		case SSHS_DO_UAR_SVC:
 			pss->ua->username = (char *)pss->last_alloc;
+			pss->last_alloc = NULL; /* it was adopted */
 			state_get_string_alloc(pss, SSHS_DO_UAR_PUBLICKEY);
 			/* destroyed with UA struct */
 			break;
 
 		case SSHS_DO_UAR_PUBLICKEY:
 			pss->ua->service = (char *)pss->last_alloc;
+			pss->last_alloc = NULL; /* it was adopted */
 
 			/* Sect 5, RFC4252
 			 *
@@ -1082,6 +1087,7 @@ again:
 
 		case SSHS_NVC_DO_UAR_ALG:
 			pss->ua->alg = (char *)pss->last_alloc;
+			pss->last_alloc = NULL; /* it was adopted */
 			if (rsa_hash_alg_from_ident(pss->ua->alg) < 0) {
 				lwsl_notice("unknown alg\n");
 				goto ua_fail;
@@ -1092,7 +1098,7 @@ again:
 
 		case SSHS_NVC_DO_UAR_PUBKEY_BLOB:
 			pss->ua->pubkey = pss->last_alloc;
-			pss->last_alloc = NULL;
+			pss->last_alloc = NULL; /* it was adopted */
 			pss->ua->pubkey_len = pss->npos;
 			/*
 			 * RFC4253
@@ -1150,7 +1156,7 @@ again:
 			}
 			lwsl_info("SSHS_DO_UAR_SIG\n");
 			pss->ua->sig = pss->last_alloc;
-			pss->last_alloc = NULL;
+			pss->last_alloc = NULL; /* it was adopted */
 			pss->ua->sig_len = pss->npos;
 			pss->parser_state = SSHS_MSG_EAT_PADDING;
 
@@ -1334,6 +1340,7 @@ again:
 
 		case SSHS_NVC_DISCONNECT_DESC:
 			pss->disconnect_desc = (char *)pss->last_alloc;
+			pss->last_alloc = NULL; /* it was adopted */
 			state_get_string(pss, SSHS_NVC_DISCONNECT_LANG);
 			break;
 
@@ -1500,12 +1507,13 @@ again:
 		case SSHS_NVC_CHRQ_MODES:
 			/* modes is a stream of byte-pairs, not a string */
 			pss->args.pty.modes = (char *)pss->last_alloc;
+			pss->last_alloc = NULL; /* it was adopted */
 			pss->args.pty.modes_len = pss->npos;
 			n = 0;
 			if (pss->vhd->ops && pss->vhd->ops->pty_req)
 				n = pss->vhd->ops->pty_req(pss->ch_temp->priv,
 							&pss->args.pty);
-			ssh_free_set_NULL(pss->last_alloc);
+			ssh_free_set_NULL(pss->args.pty.modes);
 			if (n)
 				goto chrq_fail;
 			if (pss->rq_want_reply)

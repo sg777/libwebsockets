@@ -1,23 +1,25 @@
-/*
- * libwebsockets - dbus role
+ /*
+ * libwebsockets - small server side websockets and web server implementation
  *
- * Copyright (C) 2010-2018 Andy Green <andy@warmcat.com>
+ * Copyright (C) 2010 - 2019 Andy Green <andy@warmcat.com>
  *
- *  This library is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU Lesser General Public
- *  License as published by the Free Software Foundation:
- *  version 2.1 of the License.
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
  *
- *  This library is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- *  Lesser General Public License for more details.
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
  *
- *  You should have received a copy of the GNU Lesser General Public
- *  License along with this library; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- *  MA  02110-1301  USA
- *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  *
  * This role for wrapping dbus fds in a wsi + role is unusual in that the
  * wsi it creates and binds to the role do not have control over the related fd
@@ -33,7 +35,7 @@
  * worries we create a new shadow wsi until it looks like it is closing again.
  */
 
-#include <core/private.h>
+#include <private-lib-core.h>
 
 #include <libwebsockets/lws-dbus.h>
 
@@ -288,7 +290,8 @@ lws_dbus_add_timeout(DBusTimeout *t, void *data)
 	dbt->fire = ti + (ms < 1000);
 	dbt->timer_list.prev = NULL;
 	dbt->timer_list.next = NULL;
-	lws_dll_add_front(&dbt->timer_list, &pt->dbus.timer_list_head);
+	dbt->timer_list.owner = NULL;
+	lws_dll2_add_head(&dbt->timer_list, &pt->dbus.timer_list_owner);
 
 	ctx->timeouts++;
 
@@ -303,12 +306,12 @@ lws_dbus_remove_timeout(DBusTimeout *t, void *data)
 
 	lwsl_info("%s: t %p, data %p\n", __func__, t, data);
 
-	lws_start_foreach_dll_safe(struct lws_dll *, rdt, nx,
-				   pt->dbus.timer_list_head.next) {
+	lws_start_foreach_dll_safe(struct lws_dll2 *, rdt, nx,
+				lws_dll2_get_head(&pt->dbus.timer_list_owner)) {
 		struct lws_role_dbus_timer *r = lws_container_of(rdt,
 					struct lws_role_dbus_timer, timer_list);
 		if (t == r->data) {
-			lws_dll_remove(rdt);
+			lws_dll2_remove(rdt);
 			lws_free(rdt);
 			ctx->timeouts--;
 			break;
@@ -480,15 +483,15 @@ rops_periodic_checks_dbus(struct lws_context *context, int tsi, time_t now)
 	 * service thread can modify stuff on the same pt.
 	 */
 
-	lws_start_foreach_dll_safe(struct lws_dll *, rdt, nx,
-				   pt->dbus.timer_list_head.next) {
+	lws_start_foreach_dll_safe(struct lws_dll2 *, rdt, nx,
+			 lws_dll2_get_head(&pt->dbus.timer_list_owner)) {
 		struct lws_role_dbus_timer *r = lws_container_of(rdt,
 					struct lws_role_dbus_timer, timer_list);
 
 		if (now > r->fire) {
 			lwsl_notice("%s: firing timer\n", __func__);
 			dbus_timeout_handle(r->data);
-			lws_dll_remove(rdt);
+			lws_dll2_remove(rdt);
 			lws_free(rdt);
 		}
 	} lws_end_foreach_dll_safe(rdt, nx);
